@@ -1,0 +1,2 @@
+https://github.com/Netcracker/qubership-core-utils|core-utils
+https://github.com/Netcracker/qubership-core-error-handling|core-error-handling
