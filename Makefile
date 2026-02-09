@@ -5,16 +5,26 @@ SHELL := /bin/bash
 ROOT := $(abspath .)
 TMP_DIR := $(ROOT)/tmp
 MONOREPO_DIR := $(ROOT)/monorepo
-BOM_DIR := $(MONOREPO_DIR)/bom-internal
-BOM_FILE := $(BOM_DIR)/pom.xml
 REPOS_FILE := $(ROOT)/repos.txt
+TEMPLATES_DIR := $(ROOT)/templates
 
-.PHONY: all init bom clean clean-all check-init check-bom
+# Aggregator pom.xml configuration
+MONOREPO_GROUP_ID ?= com.netcracker.cloud
+MONOREPO_ARTIFACT_ID ?= qubership-core-java-libs
+MONOREPO_VERSION ?= 1.0.0-SNAPSHOT
 
-all: init bom
+.PHONY: all init clone merge aggregator module-bom root-bom bom clean clean-aggregator clean-root-bom clean-all check-init check-bom
+
+all: clone merge aggregator bom
+
+# Backward compatibility: init = clone + merge
+init: clone merge
+
+# BOM: Generate all BOMs (module-level and root)
+bom: module-bom root-bom
 
 # =============================================================================
-# INIT: Clone repos and create monorepo with preserved git history
+# CLONE: Clone repos and apply filter-repo to move them to subdirectories
 # =============================================================================
 
 check-init:
@@ -22,8 +32,8 @@ check-init:
 	@command -v git-filter-repo >/dev/null 2>&1 || { echo "[ERROR] git-filter-repo is required"; exit 1; }
 	@[[ -f "$(REPOS_FILE)" ]] || { echo "[ERROR] $(REPOS_FILE) not found"; exit 1; }
 
-init: check-init
-	@echo "==> Step 1: Clone repos and move to subdirectories"
+clone: check-init
+	@echo "==> Cloning repos and moving to subdirectories"
 	mkdir -p "$(TMP_DIR)"
 
 	while IFS='|' read -r url subdir || [[ -n "$$url" ]]; do
@@ -45,7 +55,21 @@ init: check-init
 	  )
 	done < "$(REPOS_FILE)"
 
-	@echo "==> Step 2: Create monorepo"
+	@echo ""
+	@echo "DONE. Repos cloned and prepared in $(TMP_DIR)"
+
+# =============================================================================
+# MERGE: Create monorepo from already cloned repos
+# =============================================================================
+
+merge: check-init
+	@echo "==> Creating monorepo from cloned repos"
+
+	if [[ ! -d "$(TMP_DIR)" || -z "$$(ls -A $(TMP_DIR) 2>/dev/null)" ]]; then
+	  echo "[ERROR] No cloned repos found in $(TMP_DIR). Run 'make clone' first."
+	  exit 1
+	fi
+
 	rm -rf "$(MONOREPO_DIR)"
 	git init "$(MONOREPO_DIR)"
 
@@ -53,12 +77,17 @@ init: check-init
 	  cd "$(MONOREPO_DIR)"
 	  git commit --allow-empty -m "Initial monorepo commit"
 
-	  echo "==> Step 3: Merge rewritten histories"
+	  echo "==> Merging rewritten histories"
 
 	  while IFS='|' read -r url subdir || [[ -n "$$url" ]]; do
 	    [[ -z "$$url" || "$$url" == \#* ]] && continue
 	    repo="$$(basename "$$url" .git)"
 	    bare="$(TMP_DIR)/$${repo}.git"
+
+	    if [[ ! -d "$$bare" ]]; then
+	      echo "[WARN] Skipping $$repo - not found in $(TMP_DIR)" >&2
+	      continue
+	    fi
 
 	    git remote remove "$$subdir" 2>/dev/null || true
 	    git remote add "$$subdir" "$$bare"
@@ -73,23 +102,82 @@ init: check-init
 	@echo "DONE. Monorepo is ready at $(MONOREPO_DIR)"
 
 # =============================================================================
-# BOM: Generate Bill of Materials from monorepo
+# AGGREGATOR: Create root aggregator pom.xml
+# =============================================================================
+
+aggregator:
+	@echo "==> Creating root aggregator pom.xml"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR). Run 'make merge' first."
+	  exit 1
+	fi
+
+	template="$(TEMPLATES_DIR)/aggregator-pom.xml"
+	if [[ ! -f "$$template" ]]; then
+	  echo "[ERROR] Template not found: $$template"
+	  exit 1
+	fi
+
+	root_pom="$(MONOREPO_DIR)/pom.xml"
+
+	# Check if pom.xml already exists
+	if [[ -f "$$root_pom" ]]; then
+	  echo "[WARN] $$root_pom already exists, skipping creation"
+	  exit 0
+	fi
+
+	xml_escape() {
+	  local s="$${1:-}"
+	  s="$${s//&/&amp;}"
+	  s="$${s//</&lt;}"
+	  s="$${s//>/&gt;}"
+	  s="$${s//\"/&quot;}"
+	  s="$${s//\'/&apos;}"
+	  printf '%s' "$$s"
+	}
+
+	# Escape Makefile variables for XML
+	GROUP_ID="$$(xml_escape "$(MONOREPO_GROUP_ID)")"
+	ARTIFACT_ID="$$(xml_escape "$(MONOREPO_ARTIFACT_ID)")"
+	VERSION="$$(xml_escape "$(MONOREPO_VERSION)")"
+
+	# Build modules section
+	TMPDIR="$$(mktemp -d)"
+	trap 'rm -rf "$$TMPDIR"' EXIT
+	modules_file="$$TMPDIR/modules.txt"
+
+	while IFS='|' read -r url subdir || [[ -n "$$url" ]]; do
+	  [[ -z "$$url" || "$$url" == \#* ]] && continue
+	  echo "        <module>$$(xml_escape "$$subdir")</module>" >> "$$modules_file"
+	done < "$(REPOS_FILE)"
+
+	# Replace placeholders using sed
+	# For @MODULES@ we use 'r' command to read file content
+	sed -e "s|@MONOREPO_GROUP_ID@|$$GROUP_ID|g" \
+	    -e "s|@MONOREPO_ARTIFACT_ID@|$$ARTIFACT_ID|g" \
+	    -e "s|@MONOREPO_VERSION@|$$VERSION|g" \
+	    -e "/@MODULES@/ {" -e "r $$modules_file" -e "d" -e "}" \
+	    "$$template" > "$$root_pom"
+
+	echo "[INFO] Created $$root_pom with modules from $(REPOS_FILE)"
+	@echo ""
+	@echo "[INFO] Aggregator pom.xml created successfully"
+
+# =============================================================================
+# MODULE-BOM: Generate Bill of Materials in each module
 # =============================================================================
 
 check-bom:
 	@command -v xmlstarlet >/dev/null 2>&1 || { echo "[ERROR] xmlstarlet is required"; exit 1; }
 
-bom: check-bom
-	@echo "==> Generating BOM"
+module-bom: check-bom
+	@echo "==> Generating BOM for each module"
 
 	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
-	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR). Run 'make init' first."
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR). Run 'make merge' first."
 	  exit 1
 	fi
-
-	mkdir -p "$(BOM_DIR)"
-	TMPDIR="$$(mktemp -d)"
-	trap 'rm -rf "$$TMPDIR"' EXIT
 
 	NS='x=http://maven.apache.org/POM/4.0.0'
 
@@ -128,54 +216,72 @@ bom: check-bom
 	  xmlstarlet sel -N "$$NS" -t -v '/x:project/x:artifactId' "$$pom" 2>/dev/null || true
 	}
 
-	make_repo_property_name() {
-	  local repo="$$1"
-	  local s
-	  s="$$(printf '%s' "$$repo" | tr '[:upper:]' '[:lower:]')"
-	  s="$$(printf '%s' "$$s" | sed -E 's/[^a-z0-9]+/./g; s/^\.+//; s/\.+$$//; s/\.+/./g')"
-	  [[ -z "$$s" ]] && s="repo"
-	  printf 'repo.%s.version' "$$s"
-	}
-
 	print_dep() {
-	  local g="$$1" a="$$2" v="$$3"
+	  local g="$$1" a="$$2"
 	  cat <<EOL
 	            <dependency>
 	                <groupId>$$g</groupId>
 	                <artifactId>$$a</artifactId>
-	                <version>$$v</version>
+	                <version>\$${project.version}</version>
 	            </dependency>
 	EOL
 	}
 
-	# PASS 1: scan each repo dir, collect coords into TSV per repo
-	REPO_NAMES=()
-	while IFS= read -r -d '' repo_dir; do
-	  repo_name="$$(basename "$$repo_dir")"
-	  [[ "$$repo_name" == "bom-internal" ]] && continue
-	  [[ "$$repo_name" == ".git" ]] && continue
-	  [[ ! -f "$$repo_dir/pom.xml" ]] && continue
+	# Process each module (first-level directory)
+	while IFS= read -r -d '' module_dir; do
+	  module_name="$$(basename "$$module_dir")"
 
-	  echo "[INFO] Scanning repo: $$repo_name"
-	  REPO_NAMES+=("$$repo_name")
+	  # Skip special directories
+	  [[ "$$module_name" == ".git" ]] && continue
 
-	  repo_tsv="$$TMPDIR/$${repo_name}.tsv"
-	  : > "$$repo_tsv"
+	  # Check if root pom.xml exists
+	  root_pom="$$module_dir/pom.xml"
+	  [[ ! -f "$$root_pom" ]] && continue
 
-	  mapfile -d '' poms < <(find "$$repo_dir" -name pom.xml -print0 | sort -z)
+	  echo "[INFO] Processing module: $$module_name"
+
+	  # Check if BOM already exists (directory containing "-bom")
+	  has_bom=false
+	  while IFS= read -r -d '' subdir; do
+	    subdir_name="$$(basename "$$subdir")"
+	    if [[ "$$subdir_name" == *"-bom"* ]]; then
+	      echo "[INFO]   Skipping $$module_name - BOM already exists ($$subdir_name)"
+	      has_bom=true
+	      break
+	    fi
+	  done < <(find "$$module_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+
+	  [[ "$$has_bom" == "true" ]] && continue
+
+	  # Extract groupId and version from root pom
+	  root_groupId="$$(get_groupId "$$root_pom")"
+	  root_version="$$(get_version "$$root_pom")"
+
+	  if [[ -z "$$root_groupId" || -z "$$root_version" ]]; then
+	    echo "[WARN]   Skipping $$module_name - cannot determine groupId/version" >&2
+	    continue
+	  fi
+
+	  echo "[INFO]   GroupId: $$root_groupId, Version: $$root_version"
+
+	  # Collect all artifacts from this module
+	  TMPDIR="$$(mktemp -d)"
+	  trap 'rm -rf "$$TMPDIR"' EXIT
+
+	  artifacts_file="$$TMPDIR/artifacts.tsv"
+	  : > "$$artifacts_file"
+
+	  mapfile -d '' poms < <(find "$$module_dir" -name pom.xml -print0 | sort -z)
 
 	  declare -A seen=()
 	  for pom in "$${poms[@]}"; do
 	    groupId="$$(get_groupId "$$pom")"
 	    artifactId="$$(get_artifactId "$$pom")"
-	    version="$$(get_version "$$pom")"
 
-	    if [[ -z "$${artifactId:-}" ]]; then
-	      echo "[WARN] Skipping pom without artifactId: $$pom" >&2
+	    if [[ -z "$$artifactId" ]]; then
 	      continue
 	    fi
-	    if [[ -z "$${groupId:-}" || -z "$${version:-}" ]]; then
-	      echo "[WARN] Skipping pom with unresolved groupId/version: $$pom" >&2
+	    if [[ -z "$$groupId" ]]; then
 	      continue
 	    fi
 
@@ -185,13 +291,24 @@ bom: check-bom
 	    fi
 	    seen["$$key"]=1
 
-	    printf '%s\t%s\t%s\n' "$$groupId" "$$artifactId" "$$version" >> "$$repo_tsv"
+	    printf '%s\t%s\n' "$$groupId" "$$artifactId" >> "$$artifacts_file"
 	  done
 	  unset seen
-	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
 
-	# Write POM header
-	cat > "$(BOM_FILE)" <<'EOL'
+	  if [[ ! -s "$$artifacts_file" ]]; then
+	    echo "[WARN]   No artifacts found in $$module_name" >&2
+	    continue
+	  fi
+
+	  # Create BOM structure
+	  bom_parent_dir="$$module_dir/$${module_name}-bom-parent"
+	  bom_internal_dir="$$bom_parent_dir/$${module_name}-bom-internal"
+
+	  mkdir -p "$$bom_internal_dir"
+
+	  # Generate bom-parent/pom.xml
+	  bom_parent_pom="$$bom_parent_dir/pom.xml"
+	  cat > "$$bom_parent_pom" <<EOL
 	<?xml version="1.0" encoding="UTF-8"?>
 	<project xmlns="http://maven.apache.org/POM/4.0.0"
 	         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -199,84 +316,279 @@ bom: check-bom
 
 	    <modelVersion>4.0.0</modelVersion>
 
-	    <groupId>com.netcracker.cloud</groupId>
-	    <artifactId>bom-internal</artifactId>
-	    <version>77.7.7-SNAPSHOT</version>
-	    <packaging>pom</packaging>
-	    <name>Internal BOM</name>
+	    <parent>
+	        <groupId>$$(xml_escape "$$root_groupId")</groupId>
+	        <artifactId>$$(xml_escape "$$module_name")</artifactId>
+	        <version>$$(xml_escape "$$root_version")</version>
+	    </parent>
 
+	    <artifactId>$$(xml_escape "$${module_name}-bom-parent")</artifactId>
+	    <packaging>pom</packaging>
+	    <name>$$(xml_escape "$$module_name") BOM Parent</name>
+
+	    <modules>
+	        <module>$$(xml_escape "$${module_name}-bom-internal")</module>
+	    </modules>
+
+	</project>
 	EOL
 
-	# PASS 2a: properties
-	{
-	  echo "    <properties>"
-	  for repo_name in "$${REPO_NAMES[@]}"; do
-	    repo_tsv="$$TMPDIR/$${repo_name}.tsv"
-	    [[ ! -s "$$repo_tsv" ]] && continue
+	  # Format bom-parent pom.xml with proper indentation
+	  xmlstarlet fo --indent-spaces 4 "$$bom_parent_pom" > "$$bom_parent_pom.tmp" && mv "$$bom_parent_pom.tmp" "$$bom_parent_pom"
+	  echo "[INFO]   Created $$bom_parent_pom"
 
-	    prop_name="$$(make_repo_property_name "$$repo_name")"
-	    base_version="$$(cut -f3 "$$repo_tsv" | head -n 1)"
-	    versions_count="$$(cut -f3 "$$repo_tsv" | sort | uniq | wc -l | tr -d ' ')"
+	  # Generate bom-internal/pom.xml
+	  bom_internal_pom="$$bom_internal_dir/pom.xml"
+	  cat > "$$bom_internal_pom" <<EOL
+	<?xml version="1.0" encoding="UTF-8"?>
+	<project xmlns="http://maven.apache.org/POM/4.0.0"
+	         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
 
-	    if [[ "$$versions_count" -gt 1 ]]; then
-	      echo "[WARN] Repo '$$repo_name' contains multiple versions; using '$$base_version' as base property '$$prop_name'" >&2
-	    fi
+	    <modelVersion>4.0.0</modelVersion>
 
-	    printf '        <%s>%s</%s>\n' \
-	      "$$(xml_escape "$$prop_name")" \
-	      "$$(xml_escape "$$base_version")" \
-	      "$$(xml_escape "$$prop_name")"
-	  done
-	  echo "    </properties>"
-	  echo ""
-	} >> "$(BOM_FILE)"
+	    <parent>
+	        <groupId>$$(xml_escape "$$root_groupId")</groupId>
+	        <artifactId>$$(xml_escape "$${module_name}-bom-parent")</artifactId>
+	        <version>$$(xml_escape "$$root_version")</version>
+	    </parent>
 
-	# PASS 2b: dependencyManagement
-	cat >> "$(BOM_FILE)" <<'EOL'
+	    <artifactId>$$(xml_escape "$${module_name}-bom-internal")</artifactId>
+	    <packaging>pom</packaging>
+	    <name>$$(xml_escape "$$module_name") BOM Internal</name>
+
 	    <dependencyManagement>
 	        <dependencies>
 	EOL
 
-	for repo_name in "$${REPO_NAMES[@]}"; do
-	  repo_tsv="$$TMPDIR/$${repo_name}.tsv"
-	  [[ ! -s "$$repo_tsv" ]] && continue
+	  # Add dependencies
+	  while IFS=$$'\t' read -r groupId artifactId; do
+	    print_dep "$$(xml_escape "$$groupId")" "$$(xml_escape "$$artifactId")" >> "$$bom_internal_pom"
+	  done < "$$artifacts_file"
 
-	  prop_name="$$(make_repo_property_name "$$repo_name")"
-	  base_version="$$(cut -f3 "$$repo_tsv" | head -n 1)"
-
-	  printf '            <!-- %s -->\n' "$$(xml_escape "$$repo_name")" >> "$(BOM_FILE)"
-
-	  while IFS=$$'\t' read -r groupId artifactId version; do
-	    eg="$$(xml_escape "$$groupId")"
-	    ea="$$(xml_escape "$$artifactId")"
-
-	    if [[ "$$version" == "$$base_version" ]]; then
-	      ev="\$${$$(xml_escape "$$prop_name")}"
-	    else
-	      ev="$$(xml_escape "$$version")"
-	    fi
-
-	    print_dep "$$eg" "$$ea" "$$ev" >> "$(BOM_FILE)"
-	  done < "$$repo_tsv"
-
-	  echo "" >> "$(BOM_FILE)"
-	done
-
-	cat >> "$(BOM_FILE)" <<'EOL'
+	  cat >> "$$bom_internal_pom" <<'EOL'
 	        </dependencies>
 	    </dependencyManagement>
 
 	</project>
 	EOL
 
-	@echo "[INFO] BOM generated: $(BOM_FILE)"
+	  # Format bom-internal pom.xml with proper indentation
+	  xmlstarlet fo --indent-spaces 4 "$$bom_internal_pom" > "$$bom_internal_pom.tmp" && mv "$$bom_internal_pom.tmp" "$$bom_internal_pom"
+	  echo "[INFO]   Created $$bom_internal_pom"
+
+	  # Add bom-parent to root pom.xml modules section
+	  if xmlstarlet sel -N "$$NS" -t -v '/x:project/x:modules' "$$root_pom" &>/dev/null; then
+	    # modules section exists, check if bom-parent already added
+	    if ! xmlstarlet sel -N "$$NS" -t -v "/x:project/x:modules/x:module[text()='$${module_name}-bom-parent']" "$$root_pom" 2>/dev/null | grep -q .; then
+	      # Detect indentation from existing <module> or use default 8 spaces
+	      indent="$$(grep -m1 '<module>' "$$root_pom" | sed 's/<module>.*//' || printf '        ')"
+	      # Insert new module before </modules> tag, preserving all formatting
+	      sed -i "s|</modules>|$${indent}<module>$${module_name}-bom-parent</module>\n&|" "$$root_pom"
+	      echo "[INFO]   Added $${module_name}-bom-parent to modules in $$root_pom"
+	    else
+	      echo "[INFO]   Module $${module_name}-bom-parent already in $$root_pom"
+	    fi
+	  else
+	    # modules section doesn't exist, create it
+	    # Detect indentation from existing first-level tags or use default 4 spaces
+	    indent="$$(grep -m1 -E '<(groupId|artifactId|version|packaging)>' "$$root_pom" | sed 's/<.*//' || printf '    ')"
+	    # Insert modules section before </project> tag, preserving all formatting
+	    sed -i "s|</project>|$${indent}<modules>\n$${indent}    <module>$${module_name}-bom-parent</module>\n$${indent}</modules>\n&|" "$$root_pom"
+	    echo "[INFO]   Created modules section and added $${module_name}-bom-parent to $$root_pom"
+	  fi
+
+	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+
+	@echo ""
+	@echo "[INFO] Module BOM generation completed"
+
+# =============================================================================
+# ROOT-BOM: Create root bom-internal that imports all module BOMs
+# =============================================================================
+
+root-bom: check-bom
+	@echo "==> Creating root bom-internal"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR). Run 'make merge' first."
+	  exit 1
+	fi
+
+	template="$(TEMPLATES_DIR)/root-bom-internal-pom.xml"
+	if [[ ! -f "$$template" ]]; then
+	  echo "[ERROR] Template not found: $$template"
+	  exit 1
+	fi
+
+	bom_dir="$(MONOREPO_DIR)/bom-internal"
+	bom_pom="$$bom_dir/pom.xml"
+
+	# Check if bom-internal already exists
+	if [[ -f "$$bom_pom" ]]; then
+	  echo "[WARN] $$bom_pom already exists, skipping creation"
+	  exit 0
+	fi
+
+	mkdir -p "$$bom_dir"
+
+	NS='x=http://maven.apache.org/POM/4.0.0'
+
+	xml_escape() {
+	  local s="$${1:-}"
+	  s="$${s//&/&amp;}"
+	  s="$${s//</&lt;}"
+	  s="$${s//>/&gt;}"
+	  s="$${s//\"/&quot;}"
+	  s="$${s//\'/&apos;}"
+	  printf '%s' "$$s"
+	}
+
+	get_groupId() {
+	  local pom="$$1"
+	  local group
+	  group="$$(xmlstarlet sel -N "$$NS" -t -v '/x:project/x:groupId' "$$pom" 2>/dev/null || true)"
+	  if [[ -z "$${group:-}" ]]; then
+	    group="$$(xmlstarlet sel -N "$$NS" -t -v '/x:project/x:parent/x:groupId' "$$pom" 2>/dev/null || true)"
+	  fi
+	  printf '%s' "$$group"
+	}
+
+	get_version() {
+	  local pom="$$1"
+	  local version
+	  version="$$(xmlstarlet sel -N "$$NS" -t -v '/x:project/x:version' "$$pom" 2>/dev/null || true)"
+	  if [[ -z "$${version:-}" ]]; then
+	    version="$$(xmlstarlet sel -N "$$NS" -t -v '/x:project/x:parent/x:version' "$$pom" 2>/dev/null || true)"
+	  fi
+	  printf '%s' "$$version"
+	}
+
+	# Escape Makefile variables for XML
+	GROUP_ID="$$(xml_escape "$(MONOREPO_GROUP_ID)")"
+	ARTIFACT_ID="$$(xml_escape "$(MONOREPO_ARTIFACT_ID)")"
+	VERSION="$$(xml_escape "$(MONOREPO_VERSION)")"
+
+	# Build dependencies and properties sections
+	TMPDIR="$$(mktemp -d)"
+	trap 'rm -rf "$$TMPDIR"' EXIT
+	deps_file="$$TMPDIR/dependencies.txt"
+	props_file="$$TMPDIR/properties.txt"
+
+	# Process each module (first-level directory)
+	while IFS= read -r -d '' module_dir; do
+	  module_name="$$(basename "$$module_dir")"
+
+	  # Skip special directories
+	  [[ "$$module_name" == ".git" ]] && continue
+	  [[ "$$module_name" == "bom-internal" ]] && continue
+
+	  # Check if root pom.xml exists
+	  root_pom="$$module_dir/pom.xml"
+	  [[ ! -f "$$root_pom" ]] && continue
+
+	  echo "[INFO] Processing module: $$module_name"
+
+	  # Check if module has its own BOM (directory containing "-bom")
+	  has_own_bom=false
+	  has_generated_bom=false
+
+	  while IFS= read -r -d '' subdir; do
+	    subdir_name="$$(basename "$$subdir")"
+	    if [[ "$$subdir_name" == *"-bom"* ]]; then
+	      if [[ "$$subdir_name" == "$${module_name}-bom-parent" ]]; then
+	        has_generated_bom=true
+	      else
+	        has_own_bom=true
+	      fi
+	    fi
+	  done < <(find "$$module_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+
+	  if [[ "$$has_own_bom" == "true" ]]; then
+	    # Module already had its own BOM - add comment
+	    echo "        <!-- $$module_name already has its own BOM -->" >> "$$deps_file"
+	  elif [[ "$$has_generated_bom" == "true" ]]; then
+	    # We generated BOM for this module - import it
+	    module_groupId="$$(get_groupId "$$root_pom")"
+	    module_version="$$(get_version "$$root_pom")"
+
+	    if [[ -z "$$module_groupId" ]]; then
+	      echo "[WARN]   Skipping $$module_name - cannot determine groupId" >&2
+	      continue
+	    fi
+	    if [[ -z "$$module_version" ]]; then
+	      echo "[WARN]   Skipping $$module_name - cannot determine version" >&2
+	      continue
+	    fi
+
+	    # Add property for module version
+	    echo "        <$${module_name}.version>$$(xml_escape "$$module_version")</$${module_name}.version>" >> "$$props_file"
+
+	    # Add dependency using property reference
+	    echo "        <!-- Import BOM from $$module_name -->" >> "$$deps_file"
+	    echo "        <dependency>" >> "$$deps_file"
+	    echo "            <groupId>$$(xml_escape "$$module_groupId")</groupId>" >> "$$deps_file"
+	    echo "            <artifactId>$$(xml_escape "$${module_name}-bom-internal")</artifactId>" >> "$$deps_file"
+	    echo "            <version>\$${$${module_name}.version}</version>" >> "$$deps_file"
+	    echo "            <type>pom</type>" >> "$$deps_file"
+	    echo "            <scope>import</scope>" >> "$$deps_file"
+	    echo "        </dependency>" >> "$$deps_file"
+	  fi
+
+	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+
+	# Replace placeholders using sed
+	sed -e "s|@MONOREPO_GROUP_ID@|$$GROUP_ID|g" \
+	    -e "s|@MONOREPO_ARTIFACT_ID@|$$ARTIFACT_ID|g" \
+	    -e "s|@MONOREPO_VERSION@|$$VERSION|g" \
+	    -e "/@PROPERTIES@/ {" -e "r $$props_file" -e "d" -e "}" \
+	    -e "/@DEPENDENCIES@/ {" -e "r $$deps_file" -e "d" -e "}" \
+	    "$$template" > "$$bom_pom"
+
+	# Format the generated pom.xml
+	xmlstarlet fo --indent-spaces 4 "$$bom_pom" > "$$bom_pom.tmp" && mv "$$bom_pom.tmp" "$$bom_pom"
+
+	echo "[INFO] Created $$bom_pom"
+
+	# Add bom-internal to root aggregator pom.xml if it exists
+	root_pom="$(MONOREPO_DIR)/pom.xml"
+	if [[ -f "$$root_pom" ]]; then
+	  if xmlstarlet sel -N "$$NS" -t -v '/x:project/x:modules' "$$root_pom" &>/dev/null; then
+	    # modules section exists, check if bom-internal already added
+	    if ! xmlstarlet sel -N "$$NS" -t -v "/x:project/x:modules/x:module[text()='bom-internal']" "$$root_pom" 2>/dev/null | grep -q .; then
+	      # Detect indentation from existing <module> or use default 8 spaces
+	      indent="$$(grep -m1 '<module>' "$$root_pom" | sed 's/<module>.*//' || printf '        ')"
+	      # Insert new module before </modules> tag, preserving all formatting
+	      sed -i "s|</modules>|$${indent}<module>bom-internal</module>\n&|" "$$root_pom"
+	      echo "[INFO]   Added bom-internal to modules in $$root_pom"
+	    else
+	      echo "[INFO]   Module bom-internal already in $$root_pom"
+	    fi
+	  fi
+	fi
+
+	@echo ""
+	@echo "[INFO] Root bom-internal created successfully"
 
 # =============================================================================
 # CLEAN
 # =============================================================================
 
 clean:
-	rm -rf "$(BOM_DIR)"
+	@echo "==> Removing all generated BOMs"
+	find "$(MONOREPO_DIR)" -mindepth 2 -maxdepth 2 -type d -name '*-bom-parent' -exec rm -rf {} + 2>/dev/null || true
+	rm -rf "$(MONOREPO_DIR)/bom-internal" 2>/dev/null || true
+	@echo "[INFO] All BOMs removed"
 
-clean-all: clean
+clean-aggregator:
+	@echo "==> Removing root aggregator pom.xml"
+	rm -f "$(MONOREPO_DIR)/pom.xml"
+	@echo "[INFO] Root pom.xml removed"
+
+clean-root-bom:
+	@echo "==> Removing root bom-internal"
+	rm -rf "$(MONOREPO_DIR)/bom-internal"
+	@echo "[INFO] Root bom-internal removed"
+
+clean-all: clean clean-aggregator clean-root-bom
 	rm -rf "$(TMP_DIR)" "$(MONOREPO_DIR)"
