@@ -13,7 +13,7 @@ MONOREPO_GROUP_ID ?= com.netcracker.cloud
 MONOREPO_ARTIFACT_ID ?= qubership-core-java-libs
 MONOREPO_VERSION ?= 1.0.0-SNAPSHOT
 
-.PHONY: all init clone merge aggregator parent bom module-bom root-bom clean clean-aggregator clean-parent clean-root-bom clean-all check-init check-bom
+.PHONY: all init clone merge aggregator parent bom module-bom root-bom bom-clean clean clean-aggregator clean-parent clean-root-bom clean-all check-init check-bom
 
 all: clone merge aggregator parent bom
 
@@ -431,7 +431,7 @@ module-bom: check-bom
 	  done < "$$artifacts_file"
 
 	  # Create BOM directory
-	  bom_dir="$$module_dir/$${module_name}-bom"
+	  bom_dir="$$module_dir/$${module_name}-bom-all"
 	  mkdir -p "$$bom_dir"
 
 	  # Generate BOM pom.xml from template
@@ -449,28 +449,83 @@ module-bom: check-bom
 	  # Add bom to root pom.xml modules section
 	  if xmlstarlet sel -N "$$NS" -t -v '/x:project/x:modules' "$$root_pom" &>/dev/null; then
 	    # modules section exists, check if bom already added
-	    if ! xmlstarlet sel -N "$$NS" -t -v "/x:project/x:modules/x:module[text()='$${module_name}-bom']" "$$root_pom" 2>/dev/null | grep -q .; then
+	    if ! xmlstarlet sel -N "$$NS" -t -v "/x:project/x:modules/x:module[text()='$${module_name}-bom-all']" "$$root_pom" 2>/dev/null | grep -q .; then
 	      # Detect indentation from existing <module> or use default 8 spaces
 	      indent="$$(grep -m1 '<module>' "$$root_pom" | sed 's/<module>.*//' || printf '        ')"
 	      # Insert new module before </modules> tag, preserving all formatting
-	      sed -i "s|</modules>|$${indent}<module>$${module_name}-bom</module>\n&|" "$$root_pom"
-	      echo "[INFO]   Added $${module_name}-bom to modules in $$root_pom"
+	      sed -i "s|</modules>|$${indent}<module>$${module_name}-bom-all</module>\n&|" "$$root_pom"
+	      echo "[INFO]   Added $${module_name}-bom-all to modules in $$root_pom"
 	    else
-	      echo "[INFO]   Module $${module_name}-bom already in $$root_pom"
+	      echo "[INFO]   Module $${module_name}-bom-all already in $$root_pom"
 	    fi
 	  else
 	    # modules section doesn't exist, create it
 	    # Detect indentation from existing first-level tags or use default 4 spaces
 	    indent="$$(grep -m1 -E '<(groupId|artifactId|version|packaging)>' "$$root_pom" | sed 's/<.*//' || printf '    ')"
 	    # Insert modules section before </project> tag, preserving all formatting
-	    sed -i "s|</project>|$${indent}<modules>\n$${indent}    <module>$${module_name}-bom</module>\n$${indent}</modules>\n&|" "$$root_pom"
-	    echo "[INFO]   Created modules section and added $${module_name}-bom to $$root_pom"
+	    sed -i "s|</project>|$${indent}<modules>\n$${indent}    <module>$${module_name}-bom-all</module>\n$${indent}</modules>\n&|" "$$root_pom"
+	    echo "[INFO]   Created modules section and added $${module_name}-bom-all to $$root_pom"
 	  fi
 
 	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
 
 	@echo ""
 	@echo "[INFO] Module BOM generation completed"
+
+# =============================================================================
+# BOM-CLEAN: Remove generated module BOMs and their references
+# =============================================================================
+
+bom-clean: check-bom
+	@echo "==> Removing generated module BOMs"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	NS='x=http://maven.apache.org/POM/4.0.0'
+
+	# Remove generated module BOMs (matching pattern: module-name/module-name-bom-all/)
+	while IFS= read -r -d '' module_dir; do
+	  module_name="$$(basename "$$module_dir")"
+	  [[ "$$module_name" == ".git" || "$$module_name" == "bom-internal" || "$$module_name" == "parent" ]] && continue
+
+	  bom_dir="$$module_dir/$${module_name}-bom-all"
+	  module_pom="$$module_dir/pom.xml"
+
+	  if [[ -d "$$bom_dir" ]]; then
+	    rm -rf "$$bom_dir"
+	    echo "[INFO]   Removed $$bom_dir"
+
+	    # Remove bom-all from module's pom.xml <modules> section
+	    if [[ -f "$$module_pom" ]]; then
+	      if xmlstarlet sel -N "$$NS" -t -v "/x:project/x:modules/x:module[text()='$${module_name}-bom-all']" "$$module_pom" 2>/dev/null | grep -q .; then
+	        # Remove the module entry using sed (preserves formatting)
+	        sed -i "/<module>$${module_name}-bom-all<\/module>/d" "$$module_pom"
+	        echo "[INFO]   Removed $${module_name}-bom-all from modules in $$module_pom"
+	      fi
+	    fi
+	  fi
+	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+
+	# Remove root bom-internal
+	if [[ -d "$(MONOREPO_DIR)/bom-internal" ]]; then
+	  rm -rf "$(MONOREPO_DIR)/bom-internal"
+	  echo "[INFO]   Removed $(MONOREPO_DIR)/bom-internal"
+
+	  # Remove bom-internal from root pom.xml
+	  root_pom="$(MONOREPO_DIR)/pom.xml"
+	  if [[ -f "$$root_pom" ]]; then
+	    if xmlstarlet sel -N "$$NS" -t -v "/x:project/x:modules/x:module[text()='bom-internal']" "$$root_pom" 2>/dev/null | grep -q .; then
+	      sed -i "/<module>bom-internal<\/module>/d" "$$root_pom"
+	      echo "[INFO]   Removed bom-internal from modules in $$root_pom"
+	    fi
+	  fi
+	fi
+
+	@echo ""
+	@echo "[INFO] BOM cleanup completed"
 
 # =============================================================================
 # ROOT-BOM: Create root bom-internal that imports all module BOMs
@@ -566,7 +621,7 @@ root-bom: check-bom
 	    subdir_name="$$(basename "$$subdir")"
 	    # Check if directory ends with "-bom" or is named "bom"
 	    if [[ "$$subdir_name" == *"-bom" || "$$subdir_name" == "bom" || "$$subdir_name" == *"-bom-"* ]]; then
-	      if [[ "$$subdir_name" == "$${module_name}-bom" ]]; then
+	      if [[ "$$subdir_name" == "$${module_name}-bom-all" ]]; then
 	        has_generated_bom=true
 	      else
 	        own_bom_dirs+=("$$subdir")
@@ -638,7 +693,7 @@ root-bom: check-bom
 	    echo "        <!-- Import generated BOM from $$module_name -->" >> "$$deps_file"
 	    echo "        <dependency>" >> "$$deps_file"
 	    echo "            <groupId>$$(xml_escape "$$module_groupId")</groupId>" >> "$$deps_file"
-	    echo "            <artifactId>$$(xml_escape "$${module_name}-bom")</artifactId>" >> "$$deps_file"
+	    echo "            <artifactId>$$(xml_escape "$${module_name}-bom-all")</artifactId>" >> "$$deps_file"
 	    echo "            <version>\$${$${module_name}.version}</version>" >> "$$deps_file"
 	    echo "            <type>pom</type>" >> "$$deps_file"
 	    echo "            <scope>import</scope>" >> "$$deps_file"
@@ -684,26 +739,7 @@ root-bom: check-bom
 # CLEAN
 # =============================================================================
 
-clean:
-	@echo "==> Removing all generated BOMs"
-
-	# Remove generated module BOMs (matching pattern: module-name/module-name-bom/)
-	while IFS= read -r -d '' module_dir; do
-	  module_name="$$(basename "$$module_dir")"
-	  [[ "$$module_name" == ".git" || "$$module_name" == "bom-internal" ]] && continue
-	  bom_dir="$$module_dir/$${module_name}-bom"
-	  if [[ -d "$$bom_dir" ]]; then
-	    rm -rf "$$bom_dir"
-	    echo "[INFO]   Removed $$bom_dir"
-	  fi
-	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
-
-	# Remove old structure (bom-parent) if exists from previous versions
-	find "$(MONOREPO_DIR)" -mindepth 2 -maxdepth 2 -type d -name '*-bom-parent' -exec rm -rf {} + 2>/dev/null || true
-
-	# Remove root bom-internal
-	rm -rf "$(MONOREPO_DIR)/bom-internal" 2>/dev/null || true
-
+clean: bom-clean
 	@echo "[INFO] All BOMs removed"
 
 clean-aggregator:
