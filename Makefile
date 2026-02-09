@@ -13,9 +13,9 @@ MONOREPO_GROUP_ID ?= com.netcracker.cloud
 MONOREPO_ARTIFACT_ID ?= qubership-core-java-libs
 MONOREPO_VERSION ?= 1.0.0-SNAPSHOT
 
-.PHONY: all init clone merge aggregator module-bom root-bom bom clean clean-aggregator clean-root-bom clean-all check-init check-bom
+.PHONY: all init clone merge aggregator parent bom module-bom root-bom clean clean-aggregator clean-parent clean-root-bom clean-all check-init check-bom
 
-all: clone merge aggregator bom
+all: clone merge aggregator parent bom
 
 # Backward compatibility: init = clone + merge
 init: clone merge
@@ -165,6 +165,124 @@ aggregator:
 	@echo "[INFO] Aggregator pom.xml created successfully"
 
 # =============================================================================
+# PARENT: Create parent pom.xml
+# =============================================================================
+
+parent:
+	@echo "==> Creating parent pom.xml"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR). Run 'make merge' first."
+	  exit 1
+	fi
+
+	template="$(TEMPLATES_DIR)/parent-pom.xml"
+	if [[ ! -f "$$template" ]]; then
+	  echo "[ERROR] Template not found: $$template"
+	  exit 1
+	fi
+
+	parent_dir="$(MONOREPO_DIR)/parent"
+	parent_pom="$$parent_dir/pom.xml"
+
+	# Check if parent already exists
+	if [[ -f "$$parent_pom" ]]; then
+	  echo "[WARN] $$parent_pom already exists, skipping creation"
+	else
+	  mkdir -p "$$parent_dir"
+
+	  xml_escape() {
+	    local s="$${1:-}"
+	    s="$${s//&/&amp;}"
+	    s="$${s//</&lt;}"
+	    s="$${s//>/&gt;}"
+	    s="$${s//\"/&quot;}"
+	    s="$${s//\'/&apos;}"
+	    printf '%s' "$$s"
+	  }
+
+	  # Escape Makefile variables for XML
+	  GROUP_ID="$$(xml_escape "$(MONOREPO_GROUP_ID)")"
+	  ARTIFACT_ID="$$(xml_escape "$(MONOREPO_ARTIFACT_ID)")"
+	  VERSION="$$(xml_escape "$(MONOREPO_VERSION)")"
+
+	  # Create parent pom.xml from template
+	  sed -e "s|@MONOREPO_GROUP_ID@|$$GROUP_ID|g" \
+	      -e "s|@MONOREPO_ARTIFACT_ID@|$$ARTIFACT_ID|g" \
+	      -e "s|@MONOREPO_VERSION@|$$VERSION|g" \
+	      "$$template" > "$$parent_pom"
+
+	  # Format the generated pom.xml
+	  xmlstarlet fo --indent-spaces 4 "$$parent_pom" > "$$parent_pom.tmp" && mv "$$parent_pom.tmp" "$$parent_pom"
+	  echo "[INFO] Created $$parent_pom"
+	fi
+
+	# Add parent to root aggregator pom.xml if it exists
+	root_pom="$(MONOREPO_DIR)/pom.xml"
+	if [[ -f "$$root_pom" ]]; then
+	  NS='x=http://maven.apache.org/POM/4.0.0'
+	  if xmlstarlet sel -N "$$NS" -t -v '/x:project/x:modules' "$$root_pom" &>/dev/null; then
+	    # modules section exists, check if parent already added
+	    if ! xmlstarlet sel -N "$$NS" -t -v "/x:project/x:modules/x:module[text()='parent']" "$$root_pom" 2>/dev/null | grep -q .; then
+	      # Detect indentation from existing <module> or use default 8 spaces
+	      indent="$$(grep -m1 '<module>' "$$root_pom" | sed 's/<module>.*//' || printf '        ')"
+	      # Insert parent as first module
+	      sed -i "s|<modules>|&\n$${indent}<module>parent</module>|" "$$root_pom"
+	      echo "[INFO]   Added parent to modules in $$root_pom"
+	    else
+	      echo "[INFO]   Module parent already in $$root_pom"
+	    fi
+	  fi
+	fi
+
+	# Add <parent> section to each module's root pom.xml
+	@echo "==> Adding parent reference to module pom.xml files"
+
+	NS='x=http://maven.apache.org/POM/4.0.0'
+
+	while IFS= read -r -d '' module_dir; do
+	  module_name="$$(basename "$$module_dir")"
+
+	  # Skip special directories
+	  [[ "$$module_name" == ".git" ]] && continue
+	  [[ "$$module_name" == "parent" ]] && continue
+	  [[ "$$module_name" == "bom-internal" ]] && continue
+
+	  module_pom="$$module_dir/pom.xml"
+	  [[ ! -f "$$module_pom" ]] && continue
+
+	  # Check if parent section already exists
+	  if xmlstarlet sel -N "$$NS" -t -v '/x:project/x:parent' "$$module_pom" &>/dev/null; then
+	    echo "[INFO]   Module $$module_name already has parent"
+	  else
+	    echo "[INFO]   Adding parent to $$module_name"
+
+	    # Detect indentation from existing first-level tags or use default 4 spaces
+	    indent="$$(grep -m1 -E '    <(modelVersion|groupId|artifactId)>' "$$module_pom" | sed 's/<.*//' || printf '    ')"
+
+	    # Create parent section with proper indentation
+	    TMPDIR="$$(mktemp -d)"
+	    trap 'rm -rf "$$TMPDIR"' EXIT
+	    parent_section="$$TMPDIR/parent.txt"
+
+	    echo "" > "$$parent_section"
+	    echo "$${indent}<parent>" >> "$$parent_section"
+	    echo "$${indent}    <groupId>$(MONOREPO_GROUP_ID)</groupId>" >> "$$parent_section"
+	    echo "$${indent}    <artifactId>$(MONOREPO_ARTIFACT_ID)-parent</artifactId>" >> "$$parent_section"
+	    echo "$${indent}    <version>$(MONOREPO_VERSION)</version>" >> "$$parent_section"
+	    echo "$${indent}    <relativePath>../parent</relativePath>" >> "$$parent_section"
+	    echo "$${indent}</parent>" >> "$$parent_section"
+
+	    # Insert parent section after <modelVersion> line, preserving all formatting
+	    sed -i "/<modelVersion>/r $$parent_section" "$$module_pom"
+	  fi
+
+	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+
+	@echo ""
+	@echo "[INFO] Parent pom.xml created and configured successfully"
+
+# =============================================================================
 # MODULE-BOM: Generate Bill of Materials in each module
 # =============================================================================
 
@@ -216,16 +334,11 @@ module-bom: check-bom
 	  xmlstarlet sel -N "$$NS" -t -v '/x:project/x:artifactId' "$$pom" 2>/dev/null || true
 	}
 
-	print_dep() {
-	  local g="$$1" a="$$2"
-	  cat <<EOL
-	            <dependency>
-	                <groupId>$$g</groupId>
-	                <artifactId>$$a</artifactId>
-	                <version>\$${project.version}</version>
-	            </dependency>
-	EOL
-	}
+	template="$(TEMPLATES_DIR)/module-bom-pom.xml"
+	if [[ ! -f "$$template" ]]; then
+	  echo "[ERROR] Template not found: $$template"
+	  exit 1
+	fi
 
 	# Process each module (first-level directory)
 	while IFS= read -r -d '' module_dir; do
@@ -300,102 +413,58 @@ module-bom: check-bom
 	    continue
 	  fi
 
-	  # Create BOM structure
-	  bom_parent_dir="$$module_dir/$${module_name}-bom-parent"
-	  bom_internal_dir="$$bom_parent_dir/$${module_name}-bom-internal"
+	  # Escape Makefile variables for XML
+	  GROUP_ID="$$(xml_escape "$$root_groupId")"
+	  ARTIFACT_ID="$$(xml_escape "$$module_name")"
+	  VERSION="$$(xml_escape "$$root_version")"
 
-	  mkdir -p "$$bom_internal_dir"
+	  # Build dependencies section
+	  deps_file="$$TMPDIR/dependencies.txt"
+	  : > "$$deps_file"
 
-	  # Generate bom-parent/pom.xml
-	  bom_parent_pom="$$bom_parent_dir/pom.xml"
-	  cat > "$$bom_parent_pom" <<EOL
-	<?xml version="1.0" encoding="UTF-8"?>
-	<project xmlns="http://maven.apache.org/POM/4.0.0"
-	         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-	         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-
-	    <modelVersion>4.0.0</modelVersion>
-
-	    <parent>
-	        <groupId>$$(xml_escape "$$root_groupId")</groupId>
-	        <artifactId>$$(xml_escape "$$module_name")</artifactId>
-	        <version>$$(xml_escape "$$root_version")</version>
-	    </parent>
-
-	    <artifactId>$$(xml_escape "$${module_name}-bom-parent")</artifactId>
-	    <packaging>pom</packaging>
-	    <name>$$(xml_escape "$$module_name") BOM Parent</name>
-
-	    <modules>
-	        <module>$$(xml_escape "$${module_name}-bom-internal")</module>
-	    </modules>
-
-	</project>
-	EOL
-
-	  # Format bom-parent pom.xml with proper indentation
-	  xmlstarlet fo --indent-spaces 4 "$$bom_parent_pom" > "$$bom_parent_pom.tmp" && mv "$$bom_parent_pom.tmp" "$$bom_parent_pom"
-	  echo "[INFO]   Created $$bom_parent_pom"
-
-	  # Generate bom-internal/pom.xml
-	  bom_internal_pom="$$bom_internal_dir/pom.xml"
-	  cat > "$$bom_internal_pom" <<EOL
-	<?xml version="1.0" encoding="UTF-8"?>
-	<project xmlns="http://maven.apache.org/POM/4.0.0"
-	         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-	         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-
-	    <modelVersion>4.0.0</modelVersion>
-
-	    <parent>
-	        <groupId>$$(xml_escape "$$root_groupId")</groupId>
-	        <artifactId>$$(xml_escape "$${module_name}-bom-parent")</artifactId>
-	        <version>$$(xml_escape "$$root_version")</version>
-	    </parent>
-
-	    <artifactId>$$(xml_escape "$${module_name}-bom-internal")</artifactId>
-	    <packaging>pom</packaging>
-	    <name>$$(xml_escape "$$module_name") BOM Internal</name>
-
-	    <dependencyManagement>
-	        <dependencies>
-	EOL
-
-	  # Add dependencies
 	  while IFS=$$'\t' read -r groupId artifactId; do
-	    print_dep "$$(xml_escape "$$groupId")" "$$(xml_escape "$$artifactId")" >> "$$bom_internal_pom"
+	    echo "            <dependency>" >> "$$deps_file"
+	    echo "                <groupId>$$(xml_escape "$$groupId")</groupId>" >> "$$deps_file"
+	    echo "                <artifactId>$$(xml_escape "$$artifactId")</artifactId>" >> "$$deps_file"
+	    echo "                <version>\$${project.version}</version>" >> "$$deps_file"
+	    echo "            </dependency>" >> "$$deps_file"
 	  done < "$$artifacts_file"
 
-	  cat >> "$$bom_internal_pom" <<'EOL'
-	        </dependencies>
-	    </dependencyManagement>
+	  # Create BOM directory
+	  bom_dir="$$module_dir/$${module_name}-bom"
+	  mkdir -p "$$bom_dir"
 
-	</project>
-	EOL
+	  # Generate BOM pom.xml from template
+	  bom_pom="$$bom_dir/pom.xml"
+	  sed -e "s|@MODULE_GROUP_ID@|$$GROUP_ID|g" \
+	      -e "s|@MODULE_ARTIFACT_ID@|$$ARTIFACT_ID|g" \
+	      -e "s|@MODULE_VERSION@|$$VERSION|g" \
+	      -e "/@DEPENDENCIES@/ {" -e "r $$deps_file" -e "d" -e "}" \
+	      "$$template" > "$$bom_pom"
 
-	  # Format bom-internal pom.xml with proper indentation
-	  xmlstarlet fo --indent-spaces 4 "$$bom_internal_pom" > "$$bom_internal_pom.tmp" && mv "$$bom_internal_pom.tmp" "$$bom_internal_pom"
-	  echo "[INFO]   Created $$bom_internal_pom"
+	  # Format the generated pom.xml
+	  xmlstarlet fo --indent-spaces 4 "$$bom_pom" > "$$bom_pom.tmp" && mv "$$bom_pom.tmp" "$$bom_pom"
+	  echo "[INFO]   Created $$bom_pom"
 
-	  # Add bom-parent to root pom.xml modules section
+	  # Add bom to root pom.xml modules section
 	  if xmlstarlet sel -N "$$NS" -t -v '/x:project/x:modules' "$$root_pom" &>/dev/null; then
-	    # modules section exists, check if bom-parent already added
-	    if ! xmlstarlet sel -N "$$NS" -t -v "/x:project/x:modules/x:module[text()='$${module_name}-bom-parent']" "$$root_pom" 2>/dev/null | grep -q .; then
+	    # modules section exists, check if bom already added
+	    if ! xmlstarlet sel -N "$$NS" -t -v "/x:project/x:modules/x:module[text()='$${module_name}-bom']" "$$root_pom" 2>/dev/null | grep -q .; then
 	      # Detect indentation from existing <module> or use default 8 spaces
 	      indent="$$(grep -m1 '<module>' "$$root_pom" | sed 's/<module>.*//' || printf '        ')"
 	      # Insert new module before </modules> tag, preserving all formatting
-	      sed -i "s|</modules>|$${indent}<module>$${module_name}-bom-parent</module>\n&|" "$$root_pom"
-	      echo "[INFO]   Added $${module_name}-bom-parent to modules in $$root_pom"
+	      sed -i "s|</modules>|$${indent}<module>$${module_name}-bom</module>\n&|" "$$root_pom"
+	      echo "[INFO]   Added $${module_name}-bom to modules in $$root_pom"
 	    else
-	      echo "[INFO]   Module $${module_name}-bom-parent already in $$root_pom"
+	      echo "[INFO]   Module $${module_name}-bom already in $$root_pom"
 	    fi
 	  else
 	    # modules section doesn't exist, create it
 	    # Detect indentation from existing first-level tags or use default 4 spaces
 	    indent="$$(grep -m1 -E '<(groupId|artifactId|version|packaging)>' "$$root_pom" | sed 's/<.*//' || printf '    ')"
 	    # Insert modules section before </project> tag, preserving all formatting
-	    sed -i "s|</project>|$${indent}<modules>\n$${indent}    <module>$${module_name}-bom-parent</module>\n$${indent}</modules>\n&|" "$$root_pom"
-	    echo "[INFO]   Created modules section and added $${module_name}-bom-parent to $$root_pom"
+	    sed -i "s|</project>|$${indent}<modules>\n$${indent}    <module>$${module_name}-bom</module>\n$${indent}</modules>\n&|" "$$root_pom"
+	    echo "[INFO]   Created modules section and added $${module_name}-bom to $$root_pom"
 	  fi
 
 	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
@@ -497,7 +566,7 @@ root-bom: check-bom
 	    subdir_name="$$(basename "$$subdir")"
 	    # Check if directory ends with "-bom" or is named "bom"
 	    if [[ "$$subdir_name" == *"-bom" || "$$subdir_name" == "bom" || "$$subdir_name" == *"-bom-"* ]]; then
-	      if [[ "$$subdir_name" == "$${module_name}-bom-parent" ]]; then
+	      if [[ "$$subdir_name" == "$${module_name}-bom" ]]; then
 	        has_generated_bom=true
 	      else
 	        own_bom_dirs+=("$$subdir")
@@ -569,7 +638,7 @@ root-bom: check-bom
 	    echo "        <!-- Import generated BOM from $$module_name -->" >> "$$deps_file"
 	    echo "        <dependency>" >> "$$deps_file"
 	    echo "            <groupId>$$(xml_escape "$$module_groupId")</groupId>" >> "$$deps_file"
-	    echo "            <artifactId>$$(xml_escape "$${module_name}-bom-internal")</artifactId>" >> "$$deps_file"
+	    echo "            <artifactId>$$(xml_escape "$${module_name}-bom")</artifactId>" >> "$$deps_file"
 	    echo "            <version>\$${$${module_name}.version}</version>" >> "$$deps_file"
 	    echo "            <type>pom</type>" >> "$$deps_file"
 	    echo "            <scope>import</scope>" >> "$$deps_file"
@@ -617,8 +686,24 @@ root-bom: check-bom
 
 clean:
 	@echo "==> Removing all generated BOMs"
+
+	# Remove generated module BOMs (matching pattern: module-name/module-name-bom/)
+	while IFS= read -r -d '' module_dir; do
+	  module_name="$$(basename "$$module_dir")"
+	  [[ "$$module_name" == ".git" || "$$module_name" == "bom-internal" ]] && continue
+	  bom_dir="$$module_dir/$${module_name}-bom"
+	  if [[ -d "$$bom_dir" ]]; then
+	    rm -rf "$$bom_dir"
+	    echo "[INFO]   Removed $$bom_dir"
+	  fi
+	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+
+	# Remove old structure (bom-parent) if exists from previous versions
 	find "$(MONOREPO_DIR)" -mindepth 2 -maxdepth 2 -type d -name '*-bom-parent' -exec rm -rf {} + 2>/dev/null || true
+
+	# Remove root bom-internal
 	rm -rf "$(MONOREPO_DIR)/bom-internal" 2>/dev/null || true
+
 	@echo "[INFO] All BOMs removed"
 
 clean-aggregator:
@@ -626,10 +711,15 @@ clean-aggregator:
 	rm -f "$(MONOREPO_DIR)/pom.xml"
 	@echo "[INFO] Root pom.xml removed"
 
+clean-parent:
+	@echo "==> Removing parent pom.xml"
+	rm -rf "$(MONOREPO_DIR)/parent"
+	@echo "[INFO] Parent removed"
+
 clean-root-bom:
 	@echo "==> Removing root bom-internal"
 	rm -rf "$(MONOREPO_DIR)/bom-internal"
 	@echo "[INFO] Root bom-internal removed"
 
-clean-all: clean clean-aggregator clean-root-bom
+clean-all: clean clean-aggregator clean-parent clean-root-bom
 	rm -rf "$(TMP_DIR)" "$(MONOREPO_DIR)"
