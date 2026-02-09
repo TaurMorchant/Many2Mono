@@ -240,11 +240,11 @@ module-bom: check-bom
 
 	  echo "[INFO] Processing module: $$module_name"
 
-	  # Check if BOM already exists (directory containing "-bom")
+	  # Check if BOM already exists (directory ending with "-bom" or named "bom")
 	  has_bom=false
 	  while IFS= read -r -d '' subdir; do
 	    subdir_name="$$(basename "$$subdir")"
-	    if [[ "$$subdir_name" == *"-bom"* ]]; then
+	    if [[ "$$subdir_name" == *"-bom" || "$$subdir_name" == "bom" || "$$subdir_name" == *"-bom-"* ]]; then
 	      echo "[INFO]   Skipping $$module_name - BOM already exists ($$subdir_name)"
 	      has_bom=true
 	      break
@@ -490,42 +490,83 @@ root-bom: check-bom
 	  echo "[INFO] Processing module: $$module_name"
 
 	  # Check if module has its own BOM (directory containing "-bom")
-	  has_own_bom=false
 	  has_generated_bom=false
+	  own_bom_dirs=()
 
 	  while IFS= read -r -d '' subdir; do
 	    subdir_name="$$(basename "$$subdir")"
-	    if [[ "$$subdir_name" == *"-bom"* ]]; then
+	    # Check if directory ends with "-bom" or is named "bom"
+	    if [[ "$$subdir_name" == *"-bom" || "$$subdir_name" == "bom" || "$$subdir_name" == *"-bom-"* ]]; then
 	      if [[ "$$subdir_name" == "$${module_name}-bom-parent" ]]; then
 	        has_generated_bom=true
 	      else
-	        has_own_bom=true
+	        own_bom_dirs+=("$$subdir")
 	      fi
 	    fi
 	  done < <(find "$$module_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
 
-	  if [[ "$$has_own_bom" == "true" ]]; then
-	    # Module already had its own BOM - add comment
-	    echo "        <!-- $$module_name already has its own BOM -->" >> "$$deps_file"
+	  # Extract version for property
+	  module_version="$$(get_version "$$root_pom")"
+	  if [[ -z "$$module_version" ]]; then
+	    echo "[WARN]   Skipping $$module_name - cannot determine version" >&2
+	    continue
+	  fi
+
+	  # Add property for module version
+	  echo "        <$${module_name}.version>$$(xml_escape "$$module_version")</$${module_name}.version>" >> "$$props_file"
+
+	  if [[ "$${#own_bom_dirs[@]}" -gt 0 ]]; then
+	    # Module already had its own BOM
+	    if [[ "$${#own_bom_dirs[@]}" -eq 1 ]]; then
+	      # Single BOM found - check if BOM directory has simple structure
+	      module_bom_dir="$${own_bom_dirs[0]}"
+	      module_bom_name="$$(basename "$$module_bom_dir")"
+
+	      # Check if BOM directory contains only pom.xml (and optionally other files, but no subdirectories)
+	      module_bom_pom="$$module_bom_dir/pom.xml"
+	      if [[ -f "$$module_bom_pom" ]]; then
+	        # Count subdirectories in BOM directory (should be 0)
+	        bom_subdir_count=$$(find "$$module_bom_dir" -mindepth 1 -maxdepth 1 -type d | wc -l)
+
+	        if [[ $$bom_subdir_count -eq 0 ]]; then
+	          # Simple BOM structure: no subdirectories (files like README are OK)
+	          bom_groupId="$$(get_groupId "$$module_bom_pom")"
+	          bom_artifactId="$$(xmlstarlet sel -N "$$NS" -t -v '/x:project/x:artifactId' "$$module_bom_pom" 2>/dev/null || true)"
+
+	          if [[ -n "$$bom_groupId" && -n "$$bom_artifactId" ]]; then
+	            echo "        <!-- Import existing BOM from $$module_name -->" >> "$$deps_file"
+	            echo "        <dependency>" >> "$$deps_file"
+	            echo "            <groupId>$$(xml_escape "$$bom_groupId")</groupId>" >> "$$deps_file"
+	            echo "            <artifactId>$$(xml_escape "$$bom_artifactId")</artifactId>" >> "$$deps_file"
+	            echo "            <version>\$${$${module_name}.version}</version>" >> "$$deps_file"
+	            echo "            <type>pom</type>" >> "$$deps_file"
+	            echo "            <scope>import</scope>" >> "$$deps_file"
+	            echo "        </dependency>" >> "$$deps_file"
+	          else
+	            echo "        <!-- $$module_name has its own BOM ($$module_bom_name) - coordinates not found -->" >> "$$deps_file"
+	          fi
+	        else
+	          # BOM directory has complex structure
+	          echo "        <!-- $$module_name has its own BOM ($$module_bom_name) - complex BOM structure -->" >> "$$deps_file"
+	        fi
+	      else
+	        echo "        <!-- $$module_name has its own BOM ($$module_bom_name) - pom.xml not found -->" >> "$$deps_file"
+	      fi
+	    else
+	      # Multiple BOMs found - just add comment
+	      echo "        <!-- $$module_name has multiple BOMs - not imported -->" >> "$$deps_file"
+	    fi
 	  elif [[ "$$has_generated_bom" == "true" ]]; then
 	    # We generated BOM for this module - import it
 	    module_groupId="$$(get_groupId "$$root_pom")"
-	    module_version="$$(get_version "$$root_pom")"
 
 	    if [[ -z "$$module_groupId" ]]; then
 	      echo "[WARN]   Skipping $$module_name - cannot determine groupId" >&2
 	      continue
 	    fi
-	    if [[ -z "$$module_version" ]]; then
-	      echo "[WARN]   Skipping $$module_name - cannot determine version" >&2
-	      continue
-	    fi
-
-	    # Add property for module version
-	    echo "        <$${module_name}.version>$$(xml_escape "$$module_version")</$${module_name}.version>" >> "$$props_file"
 
 	    # Add dependency using property reference
-	    echo "        <!-- Import BOM from $$module_name -->" >> "$$deps_file"
+	    echo "        <!-- Import generated BOM from $$module_name -->" >> "$$deps_file"
 	    echo "        <dependency>" >> "$$deps_file"
 	    echo "            <groupId>$$(xml_escape "$$module_groupId")</groupId>" >> "$$deps_file"
 	    echo "            <artifactId>$$(xml_escape "$${module_name}-bom-internal")</artifactId>" >> "$$deps_file"
