@@ -13,7 +13,7 @@ MONOREPO_GROUP_ID ?= com.netcracker.cloud
 MONOREPO_ARTIFACT_ID ?= qubership-core-java-libs
 MONOREPO_VERSION ?= 1.0.0-SNAPSHOT
 
-.PHONY: all init clone merge aggregator parent bom module-bom root-bom bom-clean clean clean-aggregator clean-parent clean-root-bom clean-all check-init check-bom
+.PHONY: all init clone merge aggregator parent bom module-bom root-bom bom-clean rewrite-scm add-lombok-processor clean clean-aggregator clean-parent clean-root-bom clean-all check-init check-bom
 
 all: clone merge aggregator parent bom
 
@@ -353,19 +353,6 @@ module-bom: check-bom
 
 	  echo "[INFO] Processing module: $$module_name"
 
-	  # Check if BOM already exists (directory ending with "-bom" or named "bom")
-	  has_bom=false
-	  while IFS= read -r -d '' subdir; do
-	    subdir_name="$$(basename "$$subdir")"
-	    if [[ "$$subdir_name" == *"-bom" || "$$subdir_name" == "bom" || "$$subdir_name" == *"-bom-"* ]]; then
-	      echo "[INFO]   Skipping $$module_name - BOM already exists ($$subdir_name)"
-	      has_bom=true
-	      break
-	    fi
-	  done < <(find "$$module_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
-
-	  [[ "$$has_bom" == "true" ]] && continue
-
 	  # Extract groupId and version from root pom
 	  root_groupId="$$(get_groupId "$$root_pom")"
 	  root_version="$$(get_version "$$root_pom")"
@@ -613,92 +600,31 @@ root-bom: check-bom
 
 	  echo "[INFO] Processing module: $$module_name"
 
-	  # Check if module has its own BOM (directory containing "-bom")
-	  has_generated_bom=false
-	  own_bom_dirs=()
-
-	  while IFS= read -r -d '' subdir; do
-	    subdir_name="$$(basename "$$subdir")"
-	    # Check if directory ends with "-bom" or is named "bom"
-	    if [[ "$$subdir_name" == *"-bom" || "$$subdir_name" == "bom" || "$$subdir_name" == *"-bom-"* ]]; then
-	      if [[ "$$subdir_name" == "$${module_name}-bom-all" ]]; then
-	        has_generated_bom=true
-	      else
-	        own_bom_dirs+=("$$subdir")
-	      fi
-	    fi
-	  done < <(find "$$module_dir" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
-
-	  # Extract version for property
+	  # Extract version and groupId
 	  module_version="$$(get_version "$$root_pom")"
+	  module_groupId="$$(get_groupId "$$root_pom")"
+
 	  if [[ -z "$$module_version" ]]; then
 	    echo "[WARN]   Skipping $$module_name - cannot determine version" >&2
+	    continue
+	  fi
+
+	  if [[ -z "$$module_groupId" ]]; then
+	    echo "[WARN]   Skipping $$module_name - cannot determine groupId" >&2
 	    continue
 	  fi
 
 	  # Add property for module version
 	  echo "        <$${module_name}.version>$$(xml_escape "$$module_version")</$${module_name}.version>" >> "$$props_file"
 
-	  if [[ "$${#own_bom_dirs[@]}" -gt 0 ]]; then
-	    # Module already had its own BOM
-	    if [[ "$${#own_bom_dirs[@]}" -eq 1 ]]; then
-	      # Single BOM found - check if BOM directory has simple structure
-	      module_bom_dir="$${own_bom_dirs[0]}"
-	      module_bom_name="$$(basename "$$module_bom_dir")"
-
-	      # Check if BOM directory contains only pom.xml (and optionally other files, but no subdirectories)
-	      module_bom_pom="$$module_bom_dir/pom.xml"
-	      if [[ -f "$$module_bom_pom" ]]; then
-	        # Count subdirectories in BOM directory (should be 0)
-	        bom_subdir_count=$$(find "$$module_bom_dir" -mindepth 1 -maxdepth 1 -type d | wc -l)
-
-	        if [[ $$bom_subdir_count -eq 0 ]]; then
-	          # Simple BOM structure: no subdirectories (files like README are OK)
-	          bom_groupId="$$(get_groupId "$$module_bom_pom")"
-	          bom_artifactId="$$(xmlstarlet sel -N "$$NS" -t -v '/x:project/x:artifactId' "$$module_bom_pom" 2>/dev/null || true)"
-
-	          if [[ -n "$$bom_groupId" && -n "$$bom_artifactId" ]]; then
-	            echo "        <!-- Import existing BOM from $$module_name -->" >> "$$deps_file"
-	            echo "        <dependency>" >> "$$deps_file"
-	            echo "            <groupId>$$(xml_escape "$$bom_groupId")</groupId>" >> "$$deps_file"
-	            echo "            <artifactId>$$(xml_escape "$$bom_artifactId")</artifactId>" >> "$$deps_file"
-	            echo "            <version>\$${$${module_name}.version}</version>" >> "$$deps_file"
-	            echo "            <type>pom</type>" >> "$$deps_file"
-	            echo "            <scope>import</scope>" >> "$$deps_file"
-	            echo "        </dependency>" >> "$$deps_file"
-	          else
-	            echo "        <!-- $$module_name has its own BOM ($$module_bom_name) - coordinates not found -->" >> "$$deps_file"
-	          fi
-	        else
-	          # BOM directory has complex structure
-	          echo "        <!-- $$module_name has its own BOM ($$module_bom_name) - complex BOM structure -->" >> "$$deps_file"
-	        fi
-	      else
-	        echo "        <!-- $$module_name has its own BOM ($$module_bom_name) - pom.xml not found -->" >> "$$deps_file"
-	      fi
-	    else
-	      # Multiple BOMs found - just add comment
-	      echo "        <!-- $$module_name has multiple BOMs - not imported -->" >> "$$deps_file"
-	    fi
-	  elif [[ "$$has_generated_bom" == "true" ]]; then
-	    # We generated BOM for this module - import it
-	    module_groupId="$$(get_groupId "$$root_pom")"
-
-	    if [[ -z "$$module_groupId" ]]; then
-	      echo "[WARN]   Skipping $$module_name - cannot determine groupId" >&2
-	      continue
-	    fi
-
-	    # Add dependency using property reference
-	    echo "        <!-- Import generated BOM from $$module_name -->" >> "$$deps_file"
-	    echo "        <dependency>" >> "$$deps_file"
-	    echo "            <groupId>$$(xml_escape "$$module_groupId")</groupId>" >> "$$deps_file"
-	    echo "            <artifactId>$$(xml_escape "$${module_name}-bom-all")</artifactId>" >> "$$deps_file"
-	    echo "            <version>\$${$${module_name}.version}</version>" >> "$$deps_file"
-	    echo "            <type>pom</type>" >> "$$deps_file"
-	    echo "            <scope>import</scope>" >> "$$deps_file"
-	    echo "        </dependency>" >> "$$deps_file"
-	  fi
+	  # Import bom-all for this module
+	  echo "        <dependency>" >> "$$deps_file"
+	  echo "            <groupId>$$(xml_escape "$$module_groupId")</groupId>" >> "$$deps_file"
+	  echo "            <artifactId>$$(xml_escape "$${module_name}-bom-all")</artifactId>" >> "$$deps_file"
+	  echo "            <version>\$${$${module_name}.version}</version>" >> "$$deps_file"
+	  echo "            <type>pom</type>" >> "$$deps_file"
+	  echo "            <scope>import</scope>" >> "$$deps_file"
+	  echo "        </dependency>" >> "$$deps_file"
 
 	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
 
@@ -734,6 +660,182 @@ root-bom: check-bom
 
 	@echo ""
 	@echo "[INFO] Root bom-internal created successfully"
+
+# =============================================================================
+# REWRITE-SCM: Replace SCM sections in all pom.xml files
+# =============================================================================
+
+rewrite-scm:
+	@echo "==> Rewriting SCM sections in all pom.xml files"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	template="$(TEMPLATES_DIR)/scm.xml"
+	if [[ ! -f "$$template" ]]; then
+	  echo "[ERROR] Template not found: $$template"
+	  exit 1
+	fi
+
+	# Read SCM template content
+	scm_content="$$(cat "$$template")"
+
+	# Process all pom.xml files
+	while IFS= read -r -d '' pom_file; do
+	  # Check if pom.xml contains <scm> section
+	  if grep -q '<scm>' "$$pom_file"; then
+	    echo "[INFO] Rewriting SCM in $$pom_file"
+
+	    # Create temp file
+	    TMPDIR="$$(mktemp -d)"
+	    trap 'rm -rf "$$TMPDIR"' EXIT
+	    tmp_file="$$TMPDIR/pom.xml"
+
+	    # Use awk to replace SCM section (handles multiline)
+	    awk -v scm="$$scm_content" '
+	      /<scm>/ { in_scm=1; print scm; next }
+	      /<\/scm>/ { in_scm=0; next }
+	      !in_scm { print }
+	    ' "$$pom_file" > "$$tmp_file"
+
+	    mv "$$tmp_file" "$$pom_file"
+	  fi
+	done < <(find "$(MONOREPO_DIR)" -name "pom.xml" -print0)
+
+	@echo ""
+	@echo "[INFO] SCM rewrite completed"
+
+# =============================================================================
+# ADD-LOMBOK-PROCESSOR: Add lombok to maven-compiler-plugin annotationProcessorPaths
+# =============================================================================
+
+add-lombok-processor:
+	@echo "==> Adding lombok to maven-compiler-plugin annotationProcessorPaths"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	template="$(TEMPLATES_DIR)/lombok-annotation-processor.xml"
+	if [[ ! -f "$$template" ]]; then
+	  echo "[ERROR] Template not found: $$template"
+	  exit 1
+	fi
+
+	lombok_path="$$(cat "$$template")"
+
+	# Process all pom.xml files
+	while IFS= read -r -d '' pom_file; do
+	  # Check if pom.xml contains maven-compiler-plugin
+	  if ! grep -q 'maven-compiler-plugin' "$$pom_file"; then
+	    continue
+	  fi
+
+	  # Skip if lombok already configured
+	  if grep -q 'org.projectlombok' "$$pom_file" && grep -q 'annotationProcessorPaths' "$$pom_file"; then
+	    echo "[INFO] Lombok already configured in $$pom_file"
+	    continue
+	  fi
+
+	  echo "[INFO] Processing $$pom_file"
+
+	  TMPDIR="$$(mktemp -d)"
+	  trap 'rm -rf "$$TMPDIR"' EXIT
+	  tmp_file="$$TMPDIR/pom.xml"
+
+	  # Use awk to handle all cases:
+	  # 1. annotationProcessorPaths exists - add lombok path inside it
+	  # 2. configuration exists but no annotationProcessorPaths - add annotationProcessorPaths
+	  # 3. plugin exists but no configuration - add configuration with annotationProcessorPaths
+	  awk -v lombok="$$lombok_path" '
+	    BEGIN {
+	      in_compiler_plugin = 0
+	      in_configuration = 0
+	      in_annotation_paths = 0
+	      has_configuration = 0
+	      has_annotation_paths = 0
+	      plugin_indent = ""
+	      config_indent = ""
+	      paths_indent = ""
+	    }
+
+	    # Detect maven-compiler-plugin
+	    /maven-compiler-plugin/ {
+	      in_compiler_plugin = 1
+	      # Get indentation of plugin line
+	      match($$0, /^[[:space:]]*/)
+	      plugin_indent = substr($$0, RSTART, RLENGTH)
+	    }
+
+	    # Track configuration inside compiler plugin
+	    in_compiler_plugin && /<configuration>/ {
+	      in_configuration = 1
+	      has_configuration = 1
+	      match($$0, /^[[:space:]]*/)
+	      config_indent = substr($$0, RSTART, RLENGTH)
+	    }
+
+	    # Track annotationProcessorPaths
+	    in_compiler_plugin && in_configuration && /<annotationProcessorPaths>/ {
+	      in_annotation_paths = 1
+	      has_annotation_paths = 1
+	      match($$0, /^[[:space:]]*/)
+	      paths_indent = substr($$0, RSTART, RLENGTH)
+	    }
+
+	    # Add lombok before closing annotationProcessorPaths
+	    in_compiler_plugin && in_annotation_paths && /<\/annotationProcessorPaths>/ {
+	      print lombok
+	      in_annotation_paths = 0
+	    }
+
+	    # Add annotationProcessorPaths before closing configuration (if not present)
+	    in_compiler_plugin && in_configuration && !has_annotation_paths && /<\/configuration>/ {
+	      indent = config_indent "    "
+	      print indent "<annotationProcessorPaths>"
+	      print lombok
+	      print indent "</annotationProcessorPaths>"
+	      has_annotation_paths = 1
+	    }
+
+	    # Add configuration before closing plugin (if not present)
+	    in_compiler_plugin && !has_configuration && /<\/plugin>/ {
+	      indent = plugin_indent "    "
+	      print indent "<configuration>"
+	      print indent "    <annotationProcessorPaths>"
+	      print lombok
+	      print indent "    </annotationProcessorPaths>"
+	      print indent "</configuration>"
+	      has_configuration = 1
+	      has_annotation_paths = 1
+	    }
+
+	    # Print current line
+	    { print }
+
+	    # Reset when leaving configuration
+	    in_compiler_plugin && /<\/configuration>/ {
+	      in_configuration = 0
+	    }
+
+	    # Reset when leaving plugin
+	    in_compiler_plugin && /<\/plugin>/ {
+	      in_compiler_plugin = 0
+	      has_configuration = 0
+	      has_annotation_paths = 0
+	    }
+	  ' "$$pom_file" > "$$tmp_file"
+
+	  mv "$$tmp_file" "$$pom_file"
+	  echo "[INFO]   Added lombok annotationProcessorPath"
+
+	done < <(find "$(MONOREPO_DIR)" -name "pom.xml" -print0)
+
+	@echo ""
+	@echo "[INFO] Lombok processor configuration completed"
 
 # =============================================================================
 # CLEAN
