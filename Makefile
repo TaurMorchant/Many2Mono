@@ -13,9 +13,9 @@ MONOREPO_GROUP_ID ?= com.netcracker.cloud
 MONOREPO_ARTIFACT_ID ?= qubership-core-java-libs
 MONOREPO_VERSION ?= 1.0.0-SNAPSHOT
 
-.PHONY: all init clone merge aggregator parent bom module-bom root-bom bom-clean rewrite-scm add-lombok-processor clean clean-aggregator clean-parent clean-root-bom clean-all check-init check-bom
+.PHONY: all init clone merge aggregator parent bom module-bom root-bom bom-clean rewrite-scm add-lombok-processor add-licence clean clean-aggregator clean-parent clean-root-bom clean-all check-init check-bom
 
-all: clone merge aggregator parent bom
+all: clone merge aggregator parent bom add-licence
 
 # Backward compatibility: init = clone + merge
 init: clone merge
@@ -836,6 +836,62 @@ add-lombok-processor:
 
 	@echo ""
 	@echo "[INFO] Lombok processor configuration completed"
+
+# =============================================================================
+# ADD-LICENCE: Copy license and community files to monorepo root, remove from modules
+# =============================================================================
+
+add-licence:
+	@echo "==> Copying license and community files to monorepo root"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	licence_dir="$(TEMPLATES_DIR)/licence"
+	if [[ ! -d "$$licence_dir" ]]; then
+	  echo "[ERROR] Licence templates directory not found: $$licence_dir"
+	  exit 1
+	fi
+
+	# Files to copy to root and remove from modules
+	doc_files=("CODE-OF-CONDUCT.md" "CONTRIBUTING.md" "LICENSE" "SECURITY.md")
+
+	# Copy files from templates/licence to monorepo root
+	for doc_file in "$${doc_files[@]}"; do
+	  src="$$licence_dir/$$doc_file"
+	  dst="$(MONOREPO_DIR)/$$doc_file"
+	  if [[ -f "$$src" ]]; then
+	    cp "$$src" "$$dst"
+	    echo "[INFO] Copied $$doc_file to monorepo root"
+	  else
+	    echo "[WARN] Template not found: $$src"
+	  fi
+	done
+
+	# Remove these files from first-level modules
+	@echo "==> Removing duplicate files from modules"
+
+	while IFS= read -r -d '' module_dir; do
+	  module_name="$$(basename "$$module_dir")"
+
+	  # Skip special directories
+	  [[ "$$module_name" == ".git" ]] && continue
+	  [[ "$$module_name" == "parent" ]] && continue
+	  [[ "$$module_name" == "bom-internal" ]] && continue
+
+	  for doc_file in "$${doc_files[@]}"; do
+	    file_path="$$module_dir/$$doc_file"
+	    if [[ -f "$$file_path" ]]; then
+	      rm "$$file_path"
+	      echo "[INFO]   Removed $$doc_file from $$module_name"
+	    fi
+	  done
+	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0)
+
+	@echo ""
+	@echo "[INFO] License and community files copied successfully"
 
 # =============================================================================
 # CLEAN
