@@ -71,7 +71,7 @@ merge: check-init
 	fi
 
 	rm -rf "$(MONOREPO_DIR)"
-	git init "$(MONOREPO_DIR)"
+	git init -b main "$(MONOREPO_DIR)"
 
 	(
 	  cd "$(MONOREPO_DIR)"
