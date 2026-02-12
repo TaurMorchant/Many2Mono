@@ -13,7 +13,7 @@ MONOREPO_GROUP_ID ?= com.netcracker.cloud
 MONOREPO_ARTIFACT_ID ?= qubership-core-java-libs
 MONOREPO_VERSION ?= 1.0.0-SNAPSHOT
 
-.PHONY: all init clone merge aggregator parent bom module-bom root-bom bom-clean rewrite-scm add-lombok-processor add-licence clean clean-aggregator clean-parent clean-root-bom clean-all check-init check-bom
+.PHONY: all init clone merge aggregator parent bom module-bom root-bom bom-clean rewrite-scm add-lombok-processor add-licence add-gitignore add-workflows clean clean-aggregator clean-parent clean-root-bom clean-all check-init check-bom
 
 all: clone merge aggregator parent bom add-licence
 
@@ -892,6 +892,64 @@ add-licence:
 
 	@echo ""
 	@echo "[INFO] License and community files copied successfully"
+
+# =============================================================================
+# ADD-GITIGNORE: Create .gitignore in monorepo root from template
+# =============================================================================
+
+add-gitignore:
+	@echo "==> Creating .gitignore in monorepo root"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	template="$(TEMPLATES_DIR)/gitignore"
+	if [[ ! -f "$$template" ]]; then
+	  echo "[ERROR] Template not found: $$template"
+	  exit 1
+	fi
+
+	dst="$(MONOREPO_DIR)/.gitignore"
+	cp "$$template" "$$dst"
+	echo "[INFO] Created $$dst from template"
+
+	@echo ""
+	@echo "[INFO] .gitignore created successfully"
+
+# =============================================================================
+# ADD-WORKFLOWS: Copy .github directory to monorepo root
+# =============================================================================
+
+add-workflows:
+	@echo "==> Copying .github directory to monorepo root"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	github_template="$(TEMPLATES_DIR)/.github"
+	if [[ ! -d "$$github_template" ]]; then
+	  echo "[ERROR] .github template directory not found: $$github_template"
+	  exit 1
+	fi
+
+	dst="$(MONOREPO_DIR)/.github"
+
+	# Remove existing .github if present
+	if [[ -d "$$dst" ]]; then
+	  echo "[INFO] Removing existing $$dst"
+	  rm -rf "$$dst"
+	fi
+
+	# Copy entire .github directory
+	cp -r "$$github_template" "$$dst"
+	echo "[INFO] Copied .github directory to monorepo root"
+
+	@echo ""
+	@echo "[INFO] .github directory copied successfully"
 
 # =============================================================================
 # CLEAN

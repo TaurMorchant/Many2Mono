@@ -15,7 +15,13 @@ Many2Mono/
 │   ├── parent-pom.xml             # Шаблон parent pom.xml
 │   ├── module-bom-pom.xml         # Шаблон BOM модуля
 │   ├── root-bom-internal-pom.xml  # Шаблон корневого BOM
-└── licence/                       # Лицензионные файлы
+│   ├── gitignore                  # Шаблон .gitignore
+│   ├── .github/                   # GitHub конфигурация
+│   │   ├── CODEOWNERS             # Владельцы кода
+│   │   ├── auto-labeler-config.yaml
+│   │   ├── release-drafter-config.yml
+│   │   └── workflows/             # GitHub Actions workflows
+│   └── licence/                   # Лицензионные файлы
 │       ├── CODE-OF-CONDUCT.md     # Код поведения для монорепы
 │       ├── CONTRIBUTING.md        # Руководство для контрибьюторов
 │       ├── LICENSE                # Лицензия проекта
@@ -27,6 +33,8 @@ Many2Mono/
 │   ├── CONTRIBUTING.md             # (копируется) Руководство контрибьюторов
 │   ├── LICENSE                     # (копируется) Лицензия
 │   ├── SECURITY.md                 # (копируется) Политика безопасности
+│   ├── .gitignore                  # (копируется) Файл gitignore
+│   ├── .github/                    # (копируется) GitHub конфигурация и workflows
 │   ├── parent/                     # (генерируется) Parent pom
 │   │   └── pom.xml                 # Общий parent для всех модулей
 │   ├── bom-internal/               # (генерируется) Корневой BOM
@@ -66,6 +74,7 @@ https://github.com/Netcracker/qubership-core-utils|core-utils
 | `make module-bom` | Генерация BOM в каждом модуле монорепы |
 | `make root-bom` | Генерация корневого bom-internal (импортирует все BOM-ы модулей) |
 | `make add-licence` | Копирование LICENSE, CONTRIBUTING.md и др. в корень, удаление из модулей |
+| `make add-workflows` | Копирование .github/ из templates в корень монорепы |
 | `make bom-clean` | Удаление сгенерированных BOM и их ссылок из pom.xml |
 | `make clean` | Удаление всех сгенерированных BOM (вызывает bom-clean) |
 | `make clean-aggregator` | Удаление корневого pom.xml |
@@ -173,6 +182,11 @@ MONOREPO_GROUP_ID="com.mycompany.platform" make all
    - `SECURITY.md`
 2. Удаляет эти же файлы из всех модулей первого уровня (чтобы избежать дублирования)
 
+### Шаг 7: add-workflows
+1. Копирует директорию `templates/.github/` в корень монорепы
+2. Если `.github/` уже существует - удаляет и заменяет на шаблон
+3. Включает GitHub Actions workflows, CODEOWNERS и другие файлы конфигурации
+
 ## Особенности генерации Aggregator
 
 - Использует шаблон из `templates/aggregator-pom.xml`
@@ -226,7 +240,7 @@ MONOREPO_GROUP_ID="com.mycompany.platform" make all
 
 ## TODO / Возможные улучшения
 
-- [ ] Генерация GitHub workflows (.github/workflows/)
-- [ ] Генерация .gitignore для монорепы
+- [x] Генерация GitHub workflows (.github/workflows/) - реализовано через `make add-workflows`
+- [x] Генерация .gitignore для монорепы - реализовано через `make add-gitignore`
 - [ ] Параллельное клонирование репозиториев
 - [ ] Опциональное удаление tmp/ после успешного clone
