@@ -13,12 +13,10 @@ MONOREPO_GROUP_ID ?= com.netcracker.cloud
 MONOREPO_ARTIFACT_ID ?= qubership-core-java-libs
 MONOREPO_VERSION ?= 1.0.0-SNAPSHOT
 
-.PHONY: all init clone merge aggregator parent bom module-bom root-bom bom-clean rewrite-scm add-lombok-processor add-licence add-gitignore add-workflows clean clean-aggregator clean-parent clean-root-bom clean-all check-init check-bom
+.PHONY: all clone merge aggregator rewrite-scm add-lombok-processor add-licence add-gitignore add-workflows check-init
+.PHONY: parent bom module-bom root-bom bom-clean check-bom
 
-all: clone merge aggregator parent bom add-licence
-
-# Backward compatibility: init = clone + merge
-init: clone merge
+all: clone merge aggregator add-lombok-processor add-licence add-gitignore add-workflows
 
 # BOM: Generate all BOMs (module-level and root)
 bom: module-bom root-bom
@@ -163,6 +161,299 @@ aggregator:
 	echo "[INFO] Created $$root_pom with modules from $(REPOS_FILE)"
 	@echo ""
 	@echo "[INFO] Aggregator pom.xml created successfully"
+
+# =============================================================================
+# REWRITE-SCM: Replace SCM sections in all pom.xml files
+# =============================================================================
+
+rewrite-scm:
+	@echo "==> Rewriting SCM sections in all pom.xml files"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	template="$(TEMPLATES_DIR)/scm.xml"
+	if [[ ! -f "$$template" ]]; then
+	  echo "[ERROR] Template not found: $$template"
+	  exit 1
+	fi
+
+	# Read SCM template content
+	scm_content="$$(cat "$$template")"
+
+	# Process all pom.xml files
+	while IFS= read -r -d '' pom_file; do
+	  # Check if pom.xml contains <scm> section
+	  if grep -q '<scm>' "$$pom_file"; then
+	    echo "[INFO] Rewriting SCM in $$pom_file"
+
+	    # Create temp file
+	    TMPDIR="$$(mktemp -d)"
+	    trap 'rm -rf "$$TMPDIR"' EXIT
+	    tmp_file="$$TMPDIR/pom.xml"
+
+	    # Use awk to replace SCM section (handles multiline)
+	    awk -v scm="$$scm_content" '
+	      /<scm>/ { in_scm=1; print scm; next }
+	      /<\/scm>/ { in_scm=0; next }
+	      !in_scm { print }
+	    ' "$$pom_file" > "$$tmp_file"
+
+	    mv "$$tmp_file" "$$pom_file"
+	  fi
+	done < <(find "$(MONOREPO_DIR)" -name "pom.xml" -print0)
+
+	@echo ""
+	@echo "[INFO] SCM rewrite completed"
+
+# =============================================================================
+# ADD-LOMBOK-PROCESSOR: Add lombok to maven-compiler-plugin annotationProcessorPaths
+# =============================================================================
+
+add-lombok-processor:
+	@echo "==> Adding lombok to maven-compiler-plugin annotationProcessorPaths"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	template="$(TEMPLATES_DIR)/lombok-annotation-processor.xml"
+	if [[ ! -f "$$template" ]]; then
+	  echo "[ERROR] Template not found: $$template"
+	  exit 1
+	fi
+
+	lombok_path="$$(cat "$$template")"
+
+	# Process all pom.xml files
+	while IFS= read -r -d '' pom_file; do
+	  # Check if pom.xml contains maven-compiler-plugin
+	  if ! grep -q 'maven-compiler-plugin' "$$pom_file"; then
+	    continue
+	  fi
+
+	  # Skip if lombok already configured
+	  if grep -q 'org.projectlombok' "$$pom_file" && grep -q 'annotationProcessorPaths' "$$pom_file"; then
+	    echo "[INFO] Lombok already configured in $$pom_file"
+	    continue
+	  fi
+
+	  echo "[INFO] Processing $$pom_file"
+
+	  TMPDIR="$$(mktemp -d)"
+	  trap 'rm -rf "$$TMPDIR"' EXIT
+	  tmp_file="$$TMPDIR/pom.xml"
+
+	  # Use awk to handle all cases:
+	  # 1. annotationProcessorPaths exists - add lombok path inside it
+	  # 2. configuration exists but no annotationProcessorPaths - add annotationProcessorPaths
+	  # 3. plugin exists but no configuration - add configuration with annotationProcessorPaths
+	  awk -v lombok="$$lombok_path" '
+	    BEGIN {
+	      in_compiler_plugin = 0
+	      in_configuration = 0
+	      in_annotation_paths = 0
+	      has_configuration = 0
+	      has_annotation_paths = 0
+	      plugin_indent = ""
+	      config_indent = ""
+	      paths_indent = ""
+	    }
+
+	    # Detect maven-compiler-plugin
+	    /maven-compiler-plugin/ {
+	      in_compiler_plugin = 1
+	      # Get indentation of plugin line
+	      match($$0, /^[[:space:]]*/)
+	      plugin_indent = substr($$0, RSTART, RLENGTH)
+	    }
+
+	    # Track configuration inside compiler plugin
+	    in_compiler_plugin && /<configuration>/ {
+	      in_configuration = 1
+	      has_configuration = 1
+	      match($$0, /^[[:space:]]*/)
+	      config_indent = substr($$0, RSTART, RLENGTH)
+	    }
+
+	    # Track annotationProcessorPaths
+	    in_compiler_plugin && in_configuration && /<annotationProcessorPaths>/ {
+	      in_annotation_paths = 1
+	      has_annotation_paths = 1
+	      match($$0, /^[[:space:]]*/)
+	      paths_indent = substr($$0, RSTART, RLENGTH)
+	    }
+
+	    # Add lombok before closing annotationProcessorPaths
+	    in_compiler_plugin && in_annotation_paths && /<\/annotationProcessorPaths>/ {
+	      print lombok
+	      in_annotation_paths = 0
+	    }
+
+	    # Add annotationProcessorPaths before closing configuration (if not present)
+	    in_compiler_plugin && in_configuration && !has_annotation_paths && /<\/configuration>/ {
+	      indent = config_indent "    "
+	      print indent "<annotationProcessorPaths>"
+	      print lombok
+	      print indent "</annotationProcessorPaths>"
+	      has_annotation_paths = 1
+	    }
+
+	    # Add configuration before closing plugin (if not present)
+	    in_compiler_plugin && !has_configuration && /<\/plugin>/ {
+	      indent = plugin_indent "    "
+	      print indent "<configuration>"
+	      print indent "    <annotationProcessorPaths>"
+	      print lombok
+	      print indent "    </annotationProcessorPaths>"
+	      print indent "</configuration>"
+	      has_configuration = 1
+	      has_annotation_paths = 1
+	    }
+
+	    # Print current line
+	    { print }
+
+	    # Reset when leaving configuration
+	    in_compiler_plugin && /<\/configuration>/ {
+	      in_configuration = 0
+	    }
+
+	    # Reset when leaving plugin
+	    in_compiler_plugin && /<\/plugin>/ {
+	      in_compiler_plugin = 0
+	      has_configuration = 0
+	      has_annotation_paths = 0
+	    }
+	  ' "$$pom_file" > "$$tmp_file"
+
+	  mv "$$tmp_file" "$$pom_file"
+	  echo "[INFO]   Added lombok annotationProcessorPath"
+
+	done < <(find "$(MONOREPO_DIR)" -name "pom.xml" -print0)
+
+	@echo ""
+	@echo "[INFO] Lombok processor configuration completed"
+
+# =============================================================================
+# ADD-LICENCE: Copy license and community files to monorepo root, remove from modules
+# =============================================================================
+
+add-licence:
+	@echo "==> Copying license and community files to monorepo root"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	licence_dir="$(TEMPLATES_DIR)/licence"
+	if [[ ! -d "$$licence_dir" ]]; then
+	  echo "[ERROR] Licence templates directory not found: $$licence_dir"
+	  exit 1
+	fi
+
+	# Files to copy to root and remove from modules
+	doc_files=("CODE-OF-CONDUCT.md" "CONTRIBUTING.md" "LICENSE" "SECURITY.md")
+
+	# Copy files from templates/licence to monorepo root
+	for doc_file in "$${doc_files[@]}"; do
+	  src="$$licence_dir/$$doc_file"
+	  dst="$(MONOREPO_DIR)/$$doc_file"
+	  if [[ -f "$$src" ]]; then
+	    cp "$$src" "$$dst"
+	    echo "[INFO] Copied $$doc_file to monorepo root"
+	  else
+	    echo "[WARN] Template not found: $$src"
+	  fi
+	done
+
+	# Remove these files from first-level modules
+	@echo "==> Removing duplicate files from modules"
+
+	while IFS= read -r -d '' module_dir; do
+	  module_name="$$(basename "$$module_dir")"
+
+	  # Skip special directories
+	  [[ "$$module_name" == ".git" ]] && continue
+	  [[ "$$module_name" == "parent" ]] && continue
+	  [[ "$$module_name" == "bom-internal" ]] && continue
+
+	  for doc_file in "$${doc_files[@]}"; do
+	    file_path="$$module_dir/$$doc_file"
+	    if [[ -f "$$file_path" ]]; then
+	      rm "$$file_path"
+	      echo "[INFO]   Removed $$doc_file from $$module_name"
+	    fi
+	  done
+	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0)
+
+	@echo ""
+	@echo "[INFO] License and community files copied successfully"
+
+# =============================================================================
+# ADD-GITIGNORE: Create .gitignore in monorepo root from template
+# =============================================================================
+
+add-gitignore:
+	@echo "==> Creating .gitignore in monorepo root"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	template="$(TEMPLATES_DIR)/gitignore"
+	if [[ ! -f "$$template" ]]; then
+	  echo "[ERROR] Template not found: $$template"
+	  exit 1
+	fi
+
+	dst="$(MONOREPO_DIR)/.gitignore"
+	cp "$$template" "$$dst"
+	echo "[INFO] Created $$dst from template"
+
+	@echo ""
+	@echo "[INFO] .gitignore created successfully"
+
+# =============================================================================
+# ADD-WORKFLOWS: Copy .github directory to monorepo root
+# =============================================================================
+
+add-workflows:
+	@echo "==> Copying .github directory to monorepo root"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	github_template="$(TEMPLATES_DIR)/.github"
+	if [[ ! -d "$$github_template" ]]; then
+	  echo "[ERROR] .github template directory not found: $$github_template"
+	  exit 1
+	fi
+
+	dst="$(MONOREPO_DIR)/.github"
+
+	# Remove existing .github if present
+	if [[ -d "$$dst" ]]; then
+	  echo "[INFO] Removing existing $$dst"
+	  rm -rf "$$dst"
+	fi
+
+	# Copy entire .github directory
+	cp -r "$$github_template" "$$dst"
+	echo "[INFO] Copied .github directory to monorepo root"
+
+	@echo ""
+	@echo "[INFO] .github directory copied successfully"
+
+
+# ============================ EXPERIMENTAL ===================================
 
 # =============================================================================
 # PARENT: Create parent pom.xml
@@ -660,318 +951,3 @@ root-bom: check-bom
 
 	@echo ""
 	@echo "[INFO] Root bom-internal created successfully"
-
-# =============================================================================
-# REWRITE-SCM: Replace SCM sections in all pom.xml files
-# =============================================================================
-
-rewrite-scm:
-	@echo "==> Rewriting SCM sections in all pom.xml files"
-
-	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
-	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
-	  exit 1
-	fi
-
-	template="$(TEMPLATES_DIR)/scm.xml"
-	if [[ ! -f "$$template" ]]; then
-	  echo "[ERROR] Template not found: $$template"
-	  exit 1
-	fi
-
-	# Read SCM template content
-	scm_content="$$(cat "$$template")"
-
-	# Process all pom.xml files
-	while IFS= read -r -d '' pom_file; do
-	  # Check if pom.xml contains <scm> section
-	  if grep -q '<scm>' "$$pom_file"; then
-	    echo "[INFO] Rewriting SCM in $$pom_file"
-
-	    # Create temp file
-	    TMPDIR="$$(mktemp -d)"
-	    trap 'rm -rf "$$TMPDIR"' EXIT
-	    tmp_file="$$TMPDIR/pom.xml"
-
-	    # Use awk to replace SCM section (handles multiline)
-	    awk -v scm="$$scm_content" '
-	      /<scm>/ { in_scm=1; print scm; next }
-	      /<\/scm>/ { in_scm=0; next }
-	      !in_scm { print }
-	    ' "$$pom_file" > "$$tmp_file"
-
-	    mv "$$tmp_file" "$$pom_file"
-	  fi
-	done < <(find "$(MONOREPO_DIR)" -name "pom.xml" -print0)
-
-	@echo ""
-	@echo "[INFO] SCM rewrite completed"
-
-# =============================================================================
-# ADD-LOMBOK-PROCESSOR: Add lombok to maven-compiler-plugin annotationProcessorPaths
-# =============================================================================
-
-add-lombok-processor:
-	@echo "==> Adding lombok to maven-compiler-plugin annotationProcessorPaths"
-
-	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
-	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
-	  exit 1
-	fi
-
-	template="$(TEMPLATES_DIR)/lombok-annotation-processor.xml"
-	if [[ ! -f "$$template" ]]; then
-	  echo "[ERROR] Template not found: $$template"
-	  exit 1
-	fi
-
-	lombok_path="$$(cat "$$template")"
-
-	# Process all pom.xml files
-	while IFS= read -r -d '' pom_file; do
-	  # Check if pom.xml contains maven-compiler-plugin
-	  if ! grep -q 'maven-compiler-plugin' "$$pom_file"; then
-	    continue
-	  fi
-
-	  # Skip if lombok already configured
-	  if grep -q 'org.projectlombok' "$$pom_file" && grep -q 'annotationProcessorPaths' "$$pom_file"; then
-	    echo "[INFO] Lombok already configured in $$pom_file"
-	    continue
-	  fi
-
-	  echo "[INFO] Processing $$pom_file"
-
-	  TMPDIR="$$(mktemp -d)"
-	  trap 'rm -rf "$$TMPDIR"' EXIT
-	  tmp_file="$$TMPDIR/pom.xml"
-
-	  # Use awk to handle all cases:
-	  # 1. annotationProcessorPaths exists - add lombok path inside it
-	  # 2. configuration exists but no annotationProcessorPaths - add annotationProcessorPaths
-	  # 3. plugin exists but no configuration - add configuration with annotationProcessorPaths
-	  awk -v lombok="$$lombok_path" '
-	    BEGIN {
-	      in_compiler_plugin = 0
-	      in_configuration = 0
-	      in_annotation_paths = 0
-	      has_configuration = 0
-	      has_annotation_paths = 0
-	      plugin_indent = ""
-	      config_indent = ""
-	      paths_indent = ""
-	    }
-
-	    # Detect maven-compiler-plugin
-	    /maven-compiler-plugin/ {
-	      in_compiler_plugin = 1
-	      # Get indentation of plugin line
-	      match($$0, /^[[:space:]]*/)
-	      plugin_indent = substr($$0, RSTART, RLENGTH)
-	    }
-
-	    # Track configuration inside compiler plugin
-	    in_compiler_plugin && /<configuration>/ {
-	      in_configuration = 1
-	      has_configuration = 1
-	      match($$0, /^[[:space:]]*/)
-	      config_indent = substr($$0, RSTART, RLENGTH)
-	    }
-
-	    # Track annotationProcessorPaths
-	    in_compiler_plugin && in_configuration && /<annotationProcessorPaths>/ {
-	      in_annotation_paths = 1
-	      has_annotation_paths = 1
-	      match($$0, /^[[:space:]]*/)
-	      paths_indent = substr($$0, RSTART, RLENGTH)
-	    }
-
-	    # Add lombok before closing annotationProcessorPaths
-	    in_compiler_plugin && in_annotation_paths && /<\/annotationProcessorPaths>/ {
-	      print lombok
-	      in_annotation_paths = 0
-	    }
-
-	    # Add annotationProcessorPaths before closing configuration (if not present)
-	    in_compiler_plugin && in_configuration && !has_annotation_paths && /<\/configuration>/ {
-	      indent = config_indent "    "
-	      print indent "<annotationProcessorPaths>"
-	      print lombok
-	      print indent "</annotationProcessorPaths>"
-	      has_annotation_paths = 1
-	    }
-
-	    # Add configuration before closing plugin (if not present)
-	    in_compiler_plugin && !has_configuration && /<\/plugin>/ {
-	      indent = plugin_indent "    "
-	      print indent "<configuration>"
-	      print indent "    <annotationProcessorPaths>"
-	      print lombok
-	      print indent "    </annotationProcessorPaths>"
-	      print indent "</configuration>"
-	      has_configuration = 1
-	      has_annotation_paths = 1
-	    }
-
-	    # Print current line
-	    { print }
-
-	    # Reset when leaving configuration
-	    in_compiler_plugin && /<\/configuration>/ {
-	      in_configuration = 0
-	    }
-
-	    # Reset when leaving plugin
-	    in_compiler_plugin && /<\/plugin>/ {
-	      in_compiler_plugin = 0
-	      has_configuration = 0
-	      has_annotation_paths = 0
-	    }
-	  ' "$$pom_file" > "$$tmp_file"
-
-	  mv "$$tmp_file" "$$pom_file"
-	  echo "[INFO]   Added lombok annotationProcessorPath"
-
-	done < <(find "$(MONOREPO_DIR)" -name "pom.xml" -print0)
-
-	@echo ""
-	@echo "[INFO] Lombok processor configuration completed"
-
-# =============================================================================
-# ADD-LICENCE: Copy license and community files to monorepo root, remove from modules
-# =============================================================================
-
-add-licence:
-	@echo "==> Copying license and community files to monorepo root"
-
-	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
-	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
-	  exit 1
-	fi
-
-	licence_dir="$(TEMPLATES_DIR)/licence"
-	if [[ ! -d "$$licence_dir" ]]; then
-	  echo "[ERROR] Licence templates directory not found: $$licence_dir"
-	  exit 1
-	fi
-
-	# Files to copy to root and remove from modules
-	doc_files=("CODE-OF-CONDUCT.md" "CONTRIBUTING.md" "LICENSE" "SECURITY.md")
-
-	# Copy files from templates/licence to monorepo root
-	for doc_file in "$${doc_files[@]}"; do
-	  src="$$licence_dir/$$doc_file"
-	  dst="$(MONOREPO_DIR)/$$doc_file"
-	  if [[ -f "$$src" ]]; then
-	    cp "$$src" "$$dst"
-	    echo "[INFO] Copied $$doc_file to monorepo root"
-	  else
-	    echo "[WARN] Template not found: $$src"
-	  fi
-	done
-
-	# Remove these files from first-level modules
-	@echo "==> Removing duplicate files from modules"
-
-	while IFS= read -r -d '' module_dir; do
-	  module_name="$$(basename "$$module_dir")"
-
-	  # Skip special directories
-	  [[ "$$module_name" == ".git" ]] && continue
-	  [[ "$$module_name" == "parent" ]] && continue
-	  [[ "$$module_name" == "bom-internal" ]] && continue
-
-	  for doc_file in "$${doc_files[@]}"; do
-	    file_path="$$module_dir/$$doc_file"
-	    if [[ -f "$$file_path" ]]; then
-	      rm "$$file_path"
-	      echo "[INFO]   Removed $$doc_file from $$module_name"
-	    fi
-	  done
-	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0)
-
-	@echo ""
-	@echo "[INFO] License and community files copied successfully"
-
-# =============================================================================
-# ADD-GITIGNORE: Create .gitignore in monorepo root from template
-# =============================================================================
-
-add-gitignore:
-	@echo "==> Creating .gitignore in monorepo root"
-
-	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
-	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
-	  exit 1
-	fi
-
-	template="$(TEMPLATES_DIR)/gitignore"
-	if [[ ! -f "$$template" ]]; then
-	  echo "[ERROR] Template not found: $$template"
-	  exit 1
-	fi
-
-	dst="$(MONOREPO_DIR)/.gitignore"
-	cp "$$template" "$$dst"
-	echo "[INFO] Created $$dst from template"
-
-	@echo ""
-	@echo "[INFO] .gitignore created successfully"
-
-# =============================================================================
-# ADD-WORKFLOWS: Copy .github directory to monorepo root
-# =============================================================================
-
-add-workflows:
-	@echo "==> Copying .github directory to monorepo root"
-
-	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
-	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
-	  exit 1
-	fi
-
-	github_template="$(TEMPLATES_DIR)/.github"
-	if [[ ! -d "$$github_template" ]]; then
-	  echo "[ERROR] .github template directory not found: $$github_template"
-	  exit 1
-	fi
-
-	dst="$(MONOREPO_DIR)/.github"
-
-	# Remove existing .github if present
-	if [[ -d "$$dst" ]]; then
-	  echo "[INFO] Removing existing $$dst"
-	  rm -rf "$$dst"
-	fi
-
-	# Copy entire .github directory
-	cp -r "$$github_template" "$$dst"
-	echo "[INFO] Copied .github directory to monorepo root"
-
-	@echo ""
-	@echo "[INFO] .github directory copied successfully"
-
-# =============================================================================
-# CLEAN
-# =============================================================================
-
-clean: bom-clean
-	@echo "[INFO] All BOMs removed"
-
-clean-aggregator:
-	@echo "==> Removing root aggregator pom.xml"
-	rm -f "$(MONOREPO_DIR)/pom.xml"
-	@echo "[INFO] Root pom.xml removed"
-
-clean-parent:
-	@echo "==> Removing parent pom.xml"
-	rm -rf "$(MONOREPO_DIR)/parent"
-	@echo "[INFO] Parent removed"
-
-clean-root-bom:
-	@echo "==> Removing root bom-internal"
-	rm -rf "$(MONOREPO_DIR)/bom-internal"
-	@echo "[INFO] Root bom-internal removed"
-
-clean-all: clean clean-aggregator clean-parent clean-root-bom
-	rm -rf "$(TMP_DIR)" "$(MONOREPO_DIR)"
