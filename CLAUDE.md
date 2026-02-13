@@ -8,9 +8,11 @@
 
 ```
 Many2Mono/
-├── Makefile        # Основной скрипт сборки
-├── repos.txt       # Список репозиториев для миграции
-├── templates/      # Шаблоны для генерации файлов
+├── Makefile              # Основной скрипт сборки
+├── config.env.template   # Шаблон конфигурации (скопировать в config.env)
+├── config.env            # (создаётся) Конфигурация пользователя
+├── repos.txt             # Список репозиториев для миграции
+├── templates/            # Шаблоны для генерации файлов
 │   ├── aggregator-pom.xml         # Шаблон корневого pom.xml
 │   ├── parent-pom.xml             # Шаблон parent pom.xml
 │   ├── module-bom-pom.xml         # Шаблон BOM модуля
@@ -64,10 +66,13 @@ https://github.com/Netcracker/qubership-core-utils|core-utils
 
 | Команда | Описание |
 |---------|----------|
-| `make all` | Полный цикл: clone + merge + aggregator + parent + bom + add-licence |
+| `make all` | Полный цикл: check-config + clone + merge + aggregator + add-lombok-processor + add-licence + add-gitignore + add-workflows |
+| `make check-config` | Проверка обязательных параметров в config.env |
 | `make clone` | Клонирование репозиториев в tmp/ |
 | `make merge` | Создание монорепы из уже склонированных репозиториев |
-| `make init` | Alias для clone + merge (обратная совместимость) |
+| `make add-gitignore` | Создание .gitignore в корне монорепы |
+| `make add-lombok-processor` | Добавление Lombok в maven-compiler-plugin |
+| `make rewrite-scm` | Замена SCM секций во всех pom.xml |
 | `make aggregator` | Генерация корневого aggregator pom.xml |
 | `make parent` | Генерация parent pom.xml и добавление ссылок в модули |
 | `make bom` | Генерация всех BOM (module-bom + root-bom) |
@@ -96,21 +101,38 @@ https://github.com/Netcracker/qubership-core-utils|core-utils
 dos2unix Makefile repos.txt
 ```
 
-## Настройка корневого Aggregator (опционально)
+## Конфигурация
 
-Вы можете настроить координаты корневого pom.xml через переменные окружения:
+Перед запуском необходимо создать файл конфигурации:
 
 ```bash
-export MONOREPO_GROUP_ID="com.mycompany.platform"
-export MONOREPO_ARTIFACT_ID="platform-parent"
-export MONOREPO_VERSION="2.0.0-SNAPSHOT"
-make aggregator
+cp config.env.template config.env
+# Отредактировать config.env
 ```
 
-Или указать их прямо в команде:
-```bash
-MONOREPO_GROUP_ID="com.mycompany.platform" make all
-```
+### Обязательные параметры
+
+| Параметр | Описание | Пример |
+|----------|----------|--------|
+| `MONOREPO_GROUP_ID` | Maven groupId монорепы | `com.mycompany.platform` |
+| `MONOREPO_ARTIFACT_ID` | Maven artifactId монорепы | `my-platform` |
+| `GITHUB_ORG` | GitHub организация | `MyCompany` |
+| `GITHUB_REPO` | Имя репозитория на GitHub | `my-platform-monorepo` |
+
+### Опциональные параметры (есть значения по умолчанию)
+
+| Параметр | Описание | Default |
+|----------|----------|---------|
+| `MONOREPO_VERSION` | Версия монорепы | `1.0.0-SNAPSHOT` |
+| `JAVA_VERSION` | Версия Java для компиляции | `17` |
+| `LOMBOK_VERSION` | Версия Lombok | `1.18.42` |
+
+### Вычисляемые параметры
+
+Из `GITHUB_ORG` и `GITHUB_REPO` автоматически вычисляются:
+- `GITHUB_URL` = `https://github.com/{ORG}/{REPO}`
+- `GITHUB_SCM_URL` = `scm:git:https://github.com/{ORG}/{REPO}.git`
+- `GITHUB_PACKAGES_URL` = `https://maven.pkg.github.com/{ORG}/{REPO}`
 
 ## Как работает
 
@@ -124,13 +146,11 @@ MONOREPO_GROUP_ID="com.mycompany.platform" make all
 
 ### Шаг 3: aggregator
 1. Читает шаблон из `templates/aggregator-pom.xml`
-2. Заменяет плейсхолдеры (`@MONOREPO_GROUP_ID@`, `@MONOREPO_ARTIFACT_ID@`, `@MONOREPO_VERSION@`)
+2. Заменяет плейсхолдеры из `config.env`:
+   - `@MONOREPO_GROUP_ID@`, `@MONOREPO_ARTIFACT_ID@`, `@MONOREPO_VERSION@`
+   - `@GITHUB_URL@`, `@GITHUB_SCM_URL@`, `@GITHUB_PACKAGES_URL@`
 3. Генерирует секцию `<modules>` из `repos.txt` в порядке объявления
 4. Создаёт корневой `pom.xml` в `monorepo/`
-5. Использует параметры из переменных Makefile (можно переопределить):
-   - `MONOREPO_GROUP_ID` (по умолчанию: com.netcracker.cloud)
-   - `MONOREPO_ARTIFACT_ID` (по умолчанию: qubership-core-java-libs)
-   - `MONOREPO_VERSION` (по умолчанию: 1.0.0-SNAPSHOT)
 
 ### Шаг 4: parent
 1. Читает шаблон из `templates/parent-pom.xml`
@@ -187,12 +207,30 @@ MONOREPO_GROUP_ID="com.mycompany.platform" make all
 2. Если `.github/` уже существует - удаляет и заменяет на шаблон
 3. Включает GitHub Actions workflows, CODEOWNERS и другие файлы конфигурации
 
+## Плейсхолдеры в шаблонах
+
+Все шаблоны используют плейсхолдеры вида `@PLACEHOLDER@`, которые заменяются значениями из `config.env`:
+
+| Плейсхолдер | Источник |
+|-------------|----------|
+| `@MONOREPO_GROUP_ID@` | `MONOREPO_GROUP_ID` |
+| `@MONOREPO_ARTIFACT_ID@` | `MONOREPO_ARTIFACT_ID` |
+| `@MONOREPO_VERSION@` | `MONOREPO_VERSION` |
+| `@GITHUB_ORG@` | `GITHUB_ORG` |
+| `@GITHUB_URL@` | Вычисляется |
+| `@GITHUB_SCM_URL@` | Вычисляется |
+| `@GITHUB_PACKAGES_URL@` | Вычисляется |
+| `@JAVA_VERSION@` | `JAVA_VERSION` |
+| `@LOMBOK_VERSION@` | `LOMBOK_VERSION` |
+| `@MODULES@` | Генерируется из `repos.txt` |
+| `@DEPENDENCIES@` | Генерируется динамически |
+| `@PROPERTIES@` | Генерируется динамически |
+
 ## Особенности генерации Aggregator
 
 - Использует шаблон из `templates/aggregator-pom.xml`
 - Корневой `pom.xml` создается только если его еще нет
 - Модули добавляются в том же порядке, что и в `repos.txt`
-- Плейсхолдеры в шаблоне: `@MONOREPO_GROUP_ID@`, `@MONOREPO_ARTIFACT_ID@`, `@MONOREPO_VERSION@`, `@MODULES@`
 - XML экранируется автоматически через функцию `xml_escape`
 
 ## Особенности генерации Parent
@@ -242,11 +280,10 @@ MONOREPO_GROUP_ID="com.mycompany.platform" make all
 
 - [x] Генерация GitHub workflows (.github/workflows/) - реализовано через `make add-workflows`
 - [x] Генерация .gitignore для монорепы - реализовано через `make add-gitignore`
+- [x] Сделать файл со всеми properties - реализовано через `config.env.template`
+- [x] Сделать общий таргет для запуска всех остальных - `make all` обновлён
+- [x] Выделить BOM-таргеты отдельно - помечены как EXPERIMENTAL в Makefile
 - [ ] Удаление .github из модулей (аналогично add-licence)
-- [ ] Написать README с правилами запуска
-- [ ] Сделать общий таргет для запуска всех остальных (обновить `all`)
-- [ ] Выделить BOM-таргеты отдельно (экспериментальные)
 - [ ] Сделать таргет для пуша в remote
-- [ ] Сделать файл со всеми properties, необходимыми для работы (конфигурация)
 - [ ] Параллельное клонирование репозиториев
 - [ ] Опциональное удаление tmp/ после успешного clone

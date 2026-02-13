@@ -1,5 +1,5 @@
                         <path>
                             <groupId>org.projectlombok</groupId>
                             <artifactId>lombok</artifactId>
-                            <version>1.18.42</version>
+                            <version>@LOMBOK_VERSION@</version>
                         </path>

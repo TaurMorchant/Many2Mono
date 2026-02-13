@@ -3,20 +3,64 @@ SHELL := /bin/bash
 .SHELLFLAGS := -euo pipefail -c
 
 ROOT := $(abspath .)
-TMP_DIR := $(ROOT)/tmp
-MONOREPO_DIR := $(ROOT)/monorepo
 REPOS_FILE := $(ROOT)/repos.txt
 TEMPLATES_DIR := $(ROOT)/templates
+CONFIG_FILE := $(ROOT)/config.env
 
-# Aggregator pom.xml configuration
-MONOREPO_GROUP_ID ?= com.netcracker.cloud
-MONOREPO_ARTIFACT_ID ?= qubership-core-java-libs
+# =============================================================================
+# Load configuration from config.env if it exists
+# =============================================================================
+-include $(CONFIG_FILE)
+
+# =============================================================================
+# Configuration with defaults
+# =============================================================================
+
+# Required properties (must be set in config.env)
+MONOREPO_GROUP_ID ?=
+MONOREPO_ARTIFACT_ID ?=
+GITHUB_ORG ?=
+GITHUB_REPO ?=
+
+# Optional properties with defaults
+MONOREPO_DIR_NAME ?= monorepo
 MONOREPO_VERSION ?= 1.0.0-SNAPSHOT
+JAVA_VERSION ?= 17
+LOMBOK_VERSION ?= 1.18.42
 
-.PHONY: all clone merge aggregator rewrite-scm add-lombok-processor add-licence add-gitignore add-workflows check-init
+# Derived paths
+TMP_DIR := $(ROOT)/tmp
+MONOREPO_DIR := $(ROOT)/$(MONOREPO_DIR_NAME)
+
+# Derived URLs (computed from GITHUB_ORG and GITHUB_REPO)
+GITHUB_URL = https://github.com/$(GITHUB_ORG)/$(GITHUB_REPO)
+GITHUB_SCM_URL = scm:git:$(GITHUB_URL).git
+GITHUB_PACKAGES_URL = https://maven.pkg.github.com/$(GITHUB_ORG)/$(GITHUB_REPO)
+
+.PHONY: all clone merge aggregator rewrite-scm add-lombok-processor add-licence add-gitignore add-workflows check-init check-config
 .PHONY: parent bom module-bom root-bom bom-clean check-bom
 
-all: clone merge aggregator add-lombok-processor add-licence add-gitignore add-workflows
+all: check-config clone merge aggregator add-lombok-processor add-licence add-gitignore add-workflows
+
+# =============================================================================
+# CHECK-CONFIG: Validate required configuration
+# =============================================================================
+
+check-config:
+	@missing=""
+	@[[ -z "$(MONOREPO_GROUP_ID)" ]] && missing="$$missing MONOREPO_GROUP_ID"
+	@[[ -z "$(MONOREPO_ARTIFACT_ID)" ]] && missing="$$missing MONOREPO_ARTIFACT_ID"
+	@[[ -z "$(GITHUB_ORG)" ]] && missing="$$missing GITHUB_ORG"
+	@[[ -z "$(GITHUB_REPO)" ]] && missing="$$missing GITHUB_REPO"
+	@if [[ -n "$$missing" ]]; then
+	  echo "[ERROR] Missing required configuration:$$missing"
+	  echo ""
+	  echo "Please copy config.env.template to config.env and fill in the required values:"
+	  echo "  cp config.env.template config.env"
+	  echo "  # Edit config.env with your values"
+	  exit 1
+	fi
+	@echo "[OK] Configuration validated"
 
 # BOM: Generate all BOMs (module-level and root)
 bom: module-bom root-bom
@@ -139,6 +183,9 @@ aggregator:
 	GROUP_ID="$$(xml_escape "$(MONOREPO_GROUP_ID)")"
 	ARTIFACT_ID="$$(xml_escape "$(MONOREPO_ARTIFACT_ID)")"
 	VERSION="$$(xml_escape "$(MONOREPO_VERSION)")"
+	GH_URL="$$(xml_escape "$(GITHUB_URL)")"
+	GH_SCM_URL="$$(xml_escape "$(GITHUB_SCM_URL)")"
+	GH_PACKAGES_URL="$$(xml_escape "$(GITHUB_PACKAGES_URL)")"
 
 	# Build modules section
 	TMPDIR="$$(mktemp -d)"
@@ -155,6 +202,9 @@ aggregator:
 	sed -e "s|@MONOREPO_GROUP_ID@|$$GROUP_ID|g" \
 	    -e "s|@MONOREPO_ARTIFACT_ID@|$$ARTIFACT_ID|g" \
 	    -e "s|@MONOREPO_VERSION@|$$VERSION|g" \
+	    -e "s|@GITHUB_URL@|$$GH_URL|g" \
+	    -e "s|@GITHUB_SCM_URL@|$$GH_SCM_URL|g" \
+	    -e "s|@GITHUB_PACKAGES_URL@|$$GH_PACKAGES_URL|g" \
 	    -e "/@MODULES@/ {" -e "r $$modules_file" -e "d" -e "}" \
 	    "$$template" > "$$root_pom"
 
@@ -180,8 +230,10 @@ rewrite-scm:
 	  exit 1
 	fi
 
-	# Read SCM template content
+	# Read SCM template content and replace placeholders
 	scm_content="$$(cat "$$template")"
+	scm_content="$${scm_content//@GITHUB_SCM_URL@/$(GITHUB_SCM_URL)}"
+	scm_content="$${scm_content//@GITHUB_URL@/$(GITHUB_URL)}"
 
 	# Process all pom.xml files
 	while IFS= read -r -d '' pom_file; do
@@ -227,6 +279,7 @@ add-lombok-processor:
 	fi
 
 	lombok_path="$$(cat "$$template")"
+	lombok_path="$${lombok_path//@LOMBOK_VERSION@/$(LOMBOK_VERSION)}"
 
 	# Process all pom.xml files
 	while IFS= read -r -d '' pom_file; do
@@ -496,11 +549,21 @@ parent:
 	  GROUP_ID="$$(xml_escape "$(MONOREPO_GROUP_ID)")"
 	  ARTIFACT_ID="$$(xml_escape "$(MONOREPO_ARTIFACT_ID)")"
 	  VERSION="$$(xml_escape "$(MONOREPO_VERSION)")"
+	  GH_ORG="$$(xml_escape "$(GITHUB_ORG)")"
+	  GH_URL="$$(xml_escape "$(GITHUB_URL)")"
+	  GH_SCM_URL="$$(xml_escape "$(GITHUB_SCM_URL)")"
+	  GH_PACKAGES_URL="$$(xml_escape "$(GITHUB_PACKAGES_URL)")"
+	  JAVA_VER="$$(xml_escape "$(JAVA_VERSION)")"
 
 	  # Create parent pom.xml from template
 	  sed -e "s|@MONOREPO_GROUP_ID@|$$GROUP_ID|g" \
 	      -e "s|@MONOREPO_ARTIFACT_ID@|$$ARTIFACT_ID|g" \
 	      -e "s|@MONOREPO_VERSION@|$$VERSION|g" \
+	      -e "s|@GITHUB_ORG@|$$GH_ORG|g" \
+	      -e "s|@GITHUB_URL@|$$GH_URL|g" \
+	      -e "s|@GITHUB_SCM_URL@|$$GH_SCM_URL|g" \
+	      -e "s|@GITHUB_PACKAGES_URL@|$$GH_PACKAGES_URL|g" \
+	      -e "s|@JAVA_VERSION@|$$JAVA_VER|g" \
 	      "$$template" > "$$parent_pom"
 
 	  # Format the generated pom.xml

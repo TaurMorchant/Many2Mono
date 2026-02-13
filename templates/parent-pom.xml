@@ -31,25 +31,23 @@
     </licenses>
 
     <properties>
-        <maven.compiler.source>17</maven.compiler.source>
-        <maven.compiler.target>17</maven.compiler.target>
+        <maven.compiler.source>@JAVA_VERSION@</maven.compiler.source>
+        <maven.compiler.target>@JAVA_VERSION@</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
     </properties>
 
     <scm>
-        <connection>scm:git:https://github.com/Netcracker/qubership-core-java-libs.git</connection>
-        <developerConnection>
-            scm:git:https://github.com/Netcracker/qubership-core-java-libs.git
-        </developerConnection>
-        <url>https://github.com/Netcracker/qubership-core-java-libs</url>
+        <connection>@GITHUB_SCM_URL@</connection>
+        <developerConnection>@GITHUB_SCM_URL@</developerConnection>
+        <url>@GITHUB_URL@</url>
         <tag>HEAD</tag>
     </scm>
 
     <repositories>
         <repository>
             <id>github</id>
-            <url>https://maven.pkg.github.com/netcracker/*</url>
+            <url>https://maven.pkg.github.com/@GITHUB_ORG@/*</url>
             <snapshots />
         </repository>
     </repositories>
@@ -57,7 +55,7 @@
     <distributionManagement>
         <repository>
             <id>github</id>
-            <url>https://maven.pkg.github.com/netcracker/qubership-core-java-libs</url>
+            <url>@GITHUB_PACKAGES_URL@</url>
         </repository>
     </distributionManagement>
 

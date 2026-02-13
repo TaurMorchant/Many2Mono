@@ -23,21 +23,18 @@
         </license>
     </licenses>
 
-    <!--todo vlla: replace by placeholders-->
     <scm>
-        <connection>scm:git:https://github.com/Netcracker/qubership-core-java-libs.git</connection>
-        <developerConnection>
-            scm:git:https://github.com/Netcracker/qubership-core-java-libs.git
-        </developerConnection>
-        <url>https://github.com/Netcracker/qubership-core-java-libs</url>
+        <connection>@GITHUB_SCM_URL@</connection>
+        <developerConnection>@GITHUB_SCM_URL@</developerConnection>
+        <url>@GITHUB_URL@</url>
         <tag>HEAD</tag>
     </scm>
 
     <distributionManagement>
         <repository>
             <id>github</id>
-            <name>GitHub OWNER Apache Maven Packages</name>
-            <url>https://maven.pkg.github.com/netcracker/qubership-core-java-libs</url>
+            <name>GitHub Apache Maven Packages</name>
+            <url>@GITHUB_PACKAGES_URL@</url>
         </repository>
     </distributionManagement>
 
