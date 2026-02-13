@@ -1,0 +1,47 @@
+name: Build and Test
+
+run-name: >
+  Build Java Lib —
+  ${{ github.event_name }} (${{ github.head_ref || github.ref_name }}) —
+  [${{ github.event_name == 'push' && format('{0}', github.event.head_commit.message) || '' }}
+  ${{ github.event_name == 'pull_request' && format('{0}', github.event.pull_request.title) || '' }}]
+
+on:
+  push:
+    branches:
+      - '**'
+    tags-ignore:
+      - '**'
+  pull_request:
+    types: [ opened, synchronize, reopened ]
+
+permissions:
+  contents: read
+  pull-requests: write
+  packages: write
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Code quality/security scan on SonarQube
+        uses: netcracker/qubership-core-infra/actions/maven-snapshot-deploy@feat/monorepo-workflows
+        with:
+          java-version: '21'
+          additional-mvn-args: 'org.sonarsource.scanner.maven:sonar-maven-plugin:${{ vars.SONAR_PLUGIN_VERSION }}:sonar -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }} -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }} -Dsonar.host.url=${{ vars.SONAR_HOST_URL }}'
+          maven-username: ${{ secrets.MAVEN_USER }}
+          maven-token: ${{ secrets.MAVEN_PASSWORD }}
+          github-username: 'NetcrackerCLPLCI'
+          github-token: ${{ secrets.GH_RWD_PACKAGE_TOKEN }}
+          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          gpg-passphrase: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
