@@ -2,7 +2,7 @@
 
 ## Проблема
 
-При объединении нескольких репозиториев в монорепу возникает вопрос: как обеспечить поддержку прошлых LTS (Long-Term Support) веток исходных репозиториев?
+При объединении нескольких репозиториев в монорепу возникает вопрос: как обеспечить поддержку прошлых LTS веток исходных репозиториев?
 
 ### Что нужно обеспечить
 
@@ -18,7 +18,7 @@
 ### Текущая ситуация
 
 - Каждый исходный репозиторий имеет свои LTS ветки с именованием `lts/25.3`, `lts/25.4` и т.д.
-- Каждый модуль версионируется **независимо** (разные версии у разных репозиториев)
+- Каждый исходный репозиторий версионируется **независимо**
 - Git-теги ставятся на каждую maven-версию модуля (не релизные теги, а теги версий)
 - Модули **зависят друг от друга** — при патче одного модуля нужно обновлять зависимые
 - За согласование версий отвечает **релизная тула** (самописная), которая:
@@ -64,7 +64,7 @@
 - Клонирует **все ветки** из параметра `BRANCHES` (по умолчанию только `main`)
 - Применяет `git filter-repo` к каждой ветке отдельно
 - Мержит истории с `--allow-unrelated-histories`
-- **Поддержка LTS веток:** ✅ Реализована через параметр `BRANCHES` в `config.env`
+- **Поддержка LTS веток:** Реализована через параметр `BRANCHES` в `config.env`
   - Пример: `BRANCHES=main lts/25.3 lts/25.4`
   - Все указанные ветки переносятся в монорепу
 
@@ -135,15 +135,15 @@ $ git log --graph --pretty=format:"%s%d" --all
 ```
 $ git log --graph --pretty=format:"%s%d" --all
 
-*   Merge B (test/vlla) into /B  (HEAD -> test/vlla)
+*   Merge core-error-handling (test/vlla)  (HEAD -> test/vlla)
 |\
-| * B-test-commit
-* |   Merge A (test/vlla) into /A
+| * test commit (B)
+* |   Merge core-utils (test/vlla)
 |\ \
-| * | A-test-commit
-* | | Init (test/vlla)
+| * | test commit (A)
+* | | Initial monorepo commit (test/vlla)
  / /
-| | *   Merge B (main) into /B  (main)
+| | *   Merge core-error-handling (main)  (main)
 | | |\
 | | | * B5
 | | |/
@@ -153,7 +153,7 @@ $ git log --graph --pretty=format:"%s%d" --all
 | * | B2
 | * | B1
 |  /
-| *   Merge A (main) into /A
+| *   Merge core-utils (main)
 | |\
 | | * A5
 | |/
@@ -163,10 +163,8 @@ $ git log --graph --pretty=format:"%s%d" --all
 * | A2
 * | A1
  /
-* Init (main)
+* Initial monorepo commit (main)
 ```
-
-**Результат:** ✅ LTS ветки успешно перенесены в монорепу. Ветки связаны через общую историю исходных репозиториев (коммиты A1-A4, B1-B4 общие для обеих веток с одинаковыми SHA).
 
 ---
 
@@ -177,18 +175,19 @@ $ git log --graph --pretty=format:"%s%d" --all
 **Идея:** LTS ветка собирается **отдельно** тем же процессом clone+filter-repo+merge. Создаётся как orphan branch, но при мерже репозиториев сохраняется их общая история.
 
 **Git-дерево (упрощённо, на основе реальных репозиториев A и B):**
+
 ```
 $ git log --graph --pretty=format:"%s%d" --all
 
-*   Merge B (lts/25.4) into /B  (HEAD -> lts/25.4)
+*   Merge B (lts/25.4)  (HEAD -> lts/25.4)
 |\
 | * B-lts-1
-* |   Merge A (lts/25.4) into /A
+* |   Merge A (lts/25.4)
 |\ \
 | * | A-lts-1
-* | | Init (lts/25.4)
+* | | Initial monorepo commit (lts/25.4)
  / /
-| | *   Merge B (main) into /B  (main)
+| | *   Merge B (main)  (main)
 | | |\
 | | | * B5
 | | |/
@@ -198,7 +197,7 @@ $ git log --graph --pretty=format:"%s%d" --all
 | * | B2
 | * | B1
 |  /
-| *   Merge A (main) into /A
+| *   Merge A (main)
 | |\
 | | * A5
 | |/
@@ -208,10 +207,10 @@ $ git log --graph --pretty=format:"%s%d" --all
 * | A2
 * | A1
  /
-* Init (main)
+* Initial monorepo commit (main)
 ```
 
-**Важно:** Ветки `main` и `lts/25.4` создаются независимо (orphan branches с разными Init коммитами), но **имеют общего предка** через коммиты из исходных репозиториев. Например, коммиты A1-A3, B1-B3 — это **одни и те же коммиты** (одинаковые SHA) из исходных репозиториев, присутствующие в обеих ветках монорепы.
+**Важно:** Ветки `main` и `lts/25.4` создаются независимо (orphan branches с разными "Initial monorepo commit"), но **имеют общего предка** через коммиты из исходных репозиториев. Коммиты A1-A4, B1-B4 — это **одни и те же коммиты** с одинаковыми SHA, присутствующие в обеих ветках монорепы.
 
 **Как создаётся:**
 1. Для первой ветки (main):
