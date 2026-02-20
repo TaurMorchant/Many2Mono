@@ -94,8 +94,9 @@ clone: check-init
 
 	    # Check if branch exists in remote repo
 	    if ! git ls-remote --heads "$$url" "$$branch" | grep -q "$$branch"; then
-	      echo "[WARN] Branch $$branch not found in $$repo, skipping" >&2
-	      continue
+	      echo "[ERROR] Branch $$branch not found in $$repo" >&2
+	      echo "Please ensure all repositories have the required branches: $(BRANCHES)" >&2
+	      exit 1
 	    fi
 
 	    git clone --bare --branch "$$branch" --single-branch "$$url" "$$bare"
@@ -141,6 +142,7 @@ merge: check-init
 	    (
 	      cd "$(MONOREPO_DIR)"
 	      git checkout --orphan "$$branch"
+	      git rm -rf . 2>/dev/null || true
 	    )
 	  fi
 
