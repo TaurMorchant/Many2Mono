@@ -27,6 +27,7 @@ MONOREPO_DIR_NAME ?= monorepo
 MONOREPO_VERSION ?= 1.0.0-SNAPSHOT
 JAVA_VERSION ?= 17
 LOMBOK_VERSION ?= 1.18.42
+BRANCHES ?= main
 
 # Derived paths
 TMP_DIR := $(ROOT)/tmp
@@ -81,20 +82,32 @@ clone: check-init
 	while IFS='|' read -r url subdir || [[ -n "$$url" ]]; do
 	  [[ -z "$$url" || "$$url" == \#* ]] && continue
 	  repo="$$(basename "$$url" .git)"
-	  bare="$(TMP_DIR)/$${repo}.git"
 
-	  echo "---- Cloning $$repo -> $$subdir"
+	  for branch in $(BRANCHES); do
+	    # Replace slashes in branch name for filesystem compatibility
+	    branch_safe="$$(echo "$$branch" | tr '/' '-')"
+	    bare="$(TMP_DIR)/$${repo}-$${branch_safe}.git"
 
-	  rm -rf "$$bare"
-	  git clone --bare --branch main --single-branch "$$url" "$$bare"
+	    echo "---- Cloning $$repo ($$branch) -> $$subdir"
 
-	  (
-	    cd "$$bare"
-	    git filter-repo \
-	      --refs refs/heads/main \
-	      --to-subdirectory-filter "$$subdir" \
-	      --force
-	  )
+	    rm -rf "$$bare"
+
+	    # Check if branch exists in remote repo
+	    if ! git ls-remote --heads "$$url" "$$branch" | grep -q "$$branch"; then
+	      echo "[WARN] Branch $$branch not found in $$repo, skipping" >&2
+	      continue
+	    fi
+
+	    git clone --bare --branch "$$branch" --single-branch "$$url" "$$bare"
+
+	    (
+	      cd "$$bare"
+	      git filter-repo \
+	        --refs "refs/heads/$$branch" \
+	        --to-subdirectory-filter "$$subdir" \
+	        --force
+	    )
+	  done
 	done < "$(REPOS_FILE)"
 
 	@echo ""
@@ -112,36 +125,56 @@ merge: check-init
 	  exit 1
 	fi
 
-	rm -rf "$(MONOREPO_DIR)"
-	git init -b main "$(MONOREPO_DIR)"
+	# Process each branch
+	first_branch=true
+	for branch in $(BRANCHES); do
+	  echo ""
+	  echo "==> Processing branch: $$branch"
 
-	(
-	  cd "$(MONOREPO_DIR)"
-	  git commit --allow-empty -m "Initial monorepo commit"
+	  if [ "$$first_branch" = true ]; then
+	    # For first branch (usually main), create fresh monorepo
+	    rm -rf "$(MONOREPO_DIR)"
+	    git init -b "$$branch" "$(MONOREPO_DIR)"
+	    first_branch=false
+	  else
+	    # For subsequent branches, create orphan branch
+	    (
+	      cd "$(MONOREPO_DIR)"
+	      git checkout --orphan "$$branch"
+	    )
+	  fi
 
-	  echo "==> Merging rewritten histories"
+	  (
+	    cd "$(MONOREPO_DIR)"
+	    git commit --allow-empty -m "Initial monorepo commit ($$branch)"
 
-	  while IFS='|' read -r url subdir || [[ -n "$$url" ]]; do
-	    [[ -z "$$url" || "$$url" == \#* ]] && continue
-	    repo="$$(basename "$$url" .git)"
-	    bare="$(TMP_DIR)/$${repo}.git"
+	    echo "==> Merging rewritten histories for $$branch"
 
-	    if [[ ! -d "$$bare" ]]; then
-	      echo "[WARN] Skipping $$repo - not found in $(TMP_DIR)" >&2
-	      continue
-	    fi
+	    while IFS='|' read -r url subdir || [[ -n "$$url" ]]; do
+	      [[ -z "$$url" || "$$url" == \#* ]] && continue
+	      repo="$$(basename "$$url" .git)"
+	      branch_safe="$$(echo "$$branch" | tr '/' '-')"
+	      bare="$(TMP_DIR)/$${repo}-$${branch_safe}.git"
 
-	    git remote remove "$$subdir" 2>/dev/null || true
-	    git remote add "$$subdir" "$$bare"
-	    git fetch "$$subdir" main
-	    git merge "$$subdir/main" \
-	      --allow-unrelated-histories \
-	      -m "chore(monorepo): merge $$repo into /$$subdir"
-	  done < "$(REPOS_FILE)"
-	)
+	      if [[ ! -d "$$bare" ]]; then
+	        echo "[WARN] Skipping $$repo ($$branch) - not found in $(TMP_DIR)" >&2
+	        continue
+	      fi
+
+	      remote_name="$${subdir}-$${branch_safe}"
+	      git remote remove "$$remote_name" 2>/dev/null || true
+	      git remote add "$$remote_name" "$$bare"
+	      git fetch "$$remote_name" "$$branch"
+	      git merge "$${remote_name}/$$branch" \
+	        --allow-unrelated-histories \
+	        -m "chore(monorepo): merge $$repo ($$branch) into /$$subdir"
+	    done < "$(REPOS_FILE)"
+	  )
+	done
 
 	@echo ""
 	@echo "DONE. Monorepo is ready at $(MONOREPO_DIR)"
+	@echo "Branches created: $(BRANCHES)"
 
 # =============================================================================
 # AGGREGATOR: Create root aggregator pom.xml
