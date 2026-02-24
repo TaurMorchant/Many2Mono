@@ -38,10 +38,10 @@ GITHUB_URL = https://github.com/$(GITHUB_ORG)/$(GITHUB_REPO)
 GITHUB_SCM_URL = scm:git:$(GITHUB_URL).git
 GITHUB_PACKAGES_URL = https://maven.pkg.github.com/$(GITHUB_ORG)/$(GITHUB_REPO)
 
-.PHONY: all clone merge aggregator rewrite-scm add-lombok-processor add-licence add-gitignore add-workflows check-init check-config
+.PHONY: all clone merge aggregator rewrite-scm add-lombok-processor add-licence add-gitignore add-workflows commit check-init check-config
 .PHONY: parent bom module-bom root-bom bom-clean check-bom
 
-all: check-config clone merge aggregator add-lombok-processor add-licence add-gitignore add-workflows
+all: check-config clone merge aggregator add-lombok-processor add-licence add-gitignore add-workflows commit
 
 # =============================================================================
 # CHECK-CONFIG: Validate required configuration
@@ -244,6 +244,10 @@ aggregator:
 	    "$$template" > "$$root_pom"
 
 	echo "[INFO] Created $$root_pom with modules from $(REPOS_FILE)"
+
+	# Stage the new file
+	(cd "$(MONOREPO_DIR)" && git add pom.xml)
+
 	@echo ""
 	@echo "[INFO] Aggregator pom.xml created successfully"
 
@@ -423,6 +427,9 @@ add-lombok-processor:
 
 	done < <(find "$(MONOREPO_DIR)" -name "pom.xml" -print0)
 
+	# Stage all modified pom.xml files
+	(cd "$(MONOREPO_DIR)" && git add -A "*.xml")
+
 	@echo ""
 	@echo "[INFO] Lombok processor configuration completed"
 
@@ -473,11 +480,14 @@ add-licence:
 	  for doc_file in "$${doc_files[@]}"; do
 	    file_path="$$module_dir/$$doc_file"
 	    if [[ -f "$$file_path" ]]; then
-	      rm "$$file_path"
+	      (cd "$(MONOREPO_DIR)" && git rm -q "$$module_name/$$doc_file")
 	      echo "[INFO]   Removed $$doc_file from $$module_name"
 	    fi
 	  done
 	done < <(find "$(MONOREPO_DIR)" -mindepth 1 -maxdepth 1 -type d -print0)
+
+	# Stage new files in root
+	(cd "$(MONOREPO_DIR)" && git add CODE-OF-CONDUCT.md CONTRIBUTING.md LICENSE SECURITY.md)
 
 	@echo ""
 	@echo "[INFO] License and community files copied successfully"
@@ -503,6 +513,9 @@ add-gitignore:
 	dst="$(MONOREPO_DIR)/.gitignore"
 	cp "$$template" "$$dst"
 	echo "[INFO] Created $$dst from template"
+
+	# Stage the new file
+	(cd "$(MONOREPO_DIR)" && git add .gitignore)
 
 	@echo ""
 	@echo "[INFO] .gitignore created successfully"
@@ -537,9 +550,36 @@ add-workflows:
 	cp -r "$$github_template" "$$dst"
 	echo "[INFO] Copied .github directory to monorepo root"
 
+	# Stage the new directory
+	(cd "$(MONOREPO_DIR)" && git add .github/)
+
 	@echo ""
 	@echo "[INFO] .github directory copied successfully"
 
+# =============================================================================
+# COMMIT: Commit all staged changes
+# =============================================================================
+
+commit:
+	@echo "==> Committing monorepo initialization changes"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	(
+	  cd "$(MONOREPO_DIR)"
+	  if git diff --cached --quiet; then
+	    echo "[INFO] No staged changes to commit"
+	  else
+	    git commit -m "chore: monorepo initialization"
+	    echo "[INFO] Changes committed successfully"
+	  fi
+	)
+
+	@echo ""
+	@echo "[INFO] Commit step completed"
 
 # ============================ EXPERIMENTAL ===================================
 
