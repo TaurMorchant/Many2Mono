@@ -27,7 +27,12 @@ MONOREPO_DIR_NAME ?= monorepo
 MONOREPO_VERSION ?= 1.0.0-SNAPSHOT
 JAVA_VERSION ?= 17
 LOMBOK_VERSION ?= 1.18.42
-BRANCHES ?= main
+ADDITIONAL_BRANCHES ?=
+
+# Main branch is always first (hardcoded)
+MAIN_BRANCH := main
+# All branches = main + additional branches
+BRANCHES := $(MAIN_BRANCH) $(ADDITIONAL_BRANCHES)
 
 # Derived paths
 TMP_DIR := $(ROOT)/tmp
@@ -38,10 +43,10 @@ GITHUB_URL = https://github.com/$(GITHUB_ORG)/$(GITHUB_REPO)
 GITHUB_SCM_URL = scm:git:$(GITHUB_URL).git
 GITHUB_PACKAGES_URL = https://maven.pkg.github.com/$(GITHUB_ORG)/$(GITHUB_REPO)
 
-.PHONY: all clone merge aggregator rewrite-scm add-lombok-processor add-licence add-gitignore add-workflows commit check-init check-config
+.PHONY: all clone merge checkout-main aggregator rewrite-scm add-lombok-processor add-licence add-gitignore add-workflows commit cherry-pick-init check-init check-config
 .PHONY: parent bom module-bom root-bom bom-clean check-bom
 
-all: check-config clone merge aggregator add-lombok-processor add-licence add-gitignore add-workflows commit
+all: check-config clone merge checkout-main aggregator add-lombok-processor add-licence add-gitignore add-workflows commit cherry-pick-init
 
 # =============================================================================
 # CHECK-CONFIG: Validate required configuration
@@ -177,6 +182,21 @@ merge: check-init
 	@echo ""
 	@echo "DONE. Monorepo is ready at $(MONOREPO_DIR)"
 	@echo "Branches created: $(BRANCHES)"
+
+# =============================================================================
+# CHECKOUT-MAIN: Switch to main branch after merge
+# =============================================================================
+
+checkout-main:
+	@echo "==> Switching to $(MAIN_BRANCH) branch"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	(cd "$(MONOREPO_DIR)" && git checkout "$(MAIN_BRANCH)")
+	@echo "[INFO] Switched to branch: $(MAIN_BRANCH)"
 
 # =============================================================================
 # AGGREGATOR: Create root aggregator pom.xml
@@ -580,6 +600,58 @@ commit:
 
 	@echo ""
 	@echo "[INFO] Commit step completed"
+
+# =============================================================================
+# CHERRY-PICK-INIT: Cherry-pick initialization commit to additional branches
+# =============================================================================
+
+cherry-pick-init:
+	@echo "==> Cherry-picking initialization commit to additional branches"
+
+	if [[ ! -d "$(MONOREPO_DIR)" ]]; then
+	  echo "[ERROR] Monorepo not found at $(MONOREPO_DIR)."
+	  exit 1
+	fi
+
+	# Get the list of additional branches
+	additional_branches=($(ADDITIONAL_BRANCHES))
+
+	# Skip if no additional branches configured
+	if [[ $${#additional_branches[@]} -eq 0 ]]; then
+	  echo "[INFO] No additional branches configured, skipping cherry-pick"
+	  exit 0
+	fi
+
+	(
+	  cd "$(MONOREPO_DIR)"
+
+	  # Get the commit hash of HEAD (the initialization commit on main)
+	  init_commit="$$(git rev-parse HEAD)"
+
+	  echo "[INFO] Will cherry-pick commit $$init_commit from $(MAIN_BRANCH)"
+
+	  # Cherry-pick to each additional branch
+	  for branch in "$${additional_branches[@]}"; do
+	    echo ""
+	    echo "==> Processing branch: $$branch"
+
+	    git checkout "$$branch"
+
+	    if git cherry-pick "$$init_commit"; then
+	      echo "[INFO] Successfully cherry-picked to $$branch"
+	    else
+	      echo "[ERROR] Cherry-pick failed for $$branch. Resolve conflicts manually." >&2
+	      git cherry-pick --abort 2>/dev/null || true
+	      exit 1
+	    fi
+	  done
+
+	  # Return to main branch
+	  git checkout "$(MAIN_BRANCH)"
+	)
+
+	@echo ""
+	@echo "[INFO] Cherry-pick completed for all branches"
 
 # ============================ EXPERIMENTAL ===================================
 
