@@ -1,2 +1,1 @@
-https://github.com/Netcracker/qubership-core-utils|core-utils
-https://github.com/Netcracker/qubership-core-error-handling|core-error-handling
+https://github.com/Organization/repo-name|new-repo-name
