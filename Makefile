@@ -46,7 +46,7 @@ GITHUB_PACKAGES_URL = https://maven.pkg.github.com/$(GITHUB_ORG)/$(GITHUB_REPO)
 .PHONY: all clone merge checkout-main aggregator rewrite-scm add-lombok-processor add-licence add-gitignore add-workflows commit cherry-pick-init check-init check-config
 .PHONY: parent bom module-bom root-bom bom-clean check-bom
 
-all: check-config clone merge checkout-main aggregator add-lombok-processor add-licence add-gitignore add-workflows commit cherry-pick-init
+all: check-config clone merge checkout-main aggregator add-licence add-gitignore add-workflows commit cherry-pick-init
 
 # =============================================================================
 # CHECK-CONFIG: Validate required configuration
